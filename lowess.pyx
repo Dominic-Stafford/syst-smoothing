@@ -12,7 +12,7 @@ cimport cython
 from libc.math cimport sqrt
 
 
-def lowess(x, y, bandwidth):
+def lowess(x, y, bandwidth, weights=None):
     """Smooth a function using LOWESS algorithm.
     
     Parameters:
@@ -20,6 +20,9 @@ def lowess(x, y, bandwidth):
         y:  Corresponding values of the function.
         bandwidth: Bandwith that defines the size of the neighbourhood
             to be considered for each point.
+        weights:  Additional weights for LOWESS fit.  They should
+            normally be inversely proportional to squared uncertainties
+            associated with each point.
     
     Return value:
         An array with results of the smoothing at the same x coordinates
@@ -40,6 +43,7 @@ def lowess(x, y, bandwidth):
     
     x = np.asarray(x)
     smooth_y = np.zeros(len(y))
+    external_weights = np.asarray(weights) if weights is not None else np.ones(len(x))
     
     for i in range(len(y)):
         
@@ -54,6 +58,7 @@ def lowess(x, y, bandwidth):
         # Negative weights are clipped.
         distances = np.abs(x[start:end] - x[i]) / bandwidth
         weights = (1 - distances ** 3) ** 3
+        weights *= external_weights[start:end]
         weights[weights < 0.] = 0.
         
         # To simplify computation of mean values below, normalize
@@ -80,7 +85,7 @@ def lowess(x, y, bandwidth):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-def lowess2d(x, y, bandwidth):
+def lowess2d(x, y, bandwidth, weights=None):
     """Smooth a function of 2D data using LOWESS algorithm.
     
     Arguments:
@@ -90,6 +95,9 @@ def lowess2d(x, y, bandwidth):
             Input values of the fuction evaluated at each point.
         bandwidth: array_like of length 2
             Bandwidths to be used for each coordinate.
+        weights:  Additional weights for LOWESS fit.  They should
+            normally be inversely proportional to squared uncertainties
+            associated with each point.
     
     Return value:
         A NumPy array with smoothed values of the function.
@@ -104,14 +112,23 @@ def lowess2d(x, y, bandwidth):
     x_np = np.asarray(x, dtype=np.float64)
     y_np = np.asarray(y, dtype=np.float64)
     
+    if weights is None:
+        external_weights_np = np.ones(len(x), dtype=np.float64)
+    else:
+        external_weights_np = np.asarray(weights, dtype=np.float64)
+    
     if x_np.shape[1] != 2:
         raise RuntimeError('Size of array x along axis 1 must be 2.')
     
     if x_np.shape[0] != y_np.shape[0]:
         raise RuntimeError('Dimensions of arrays x and y do not match.')
     
+    if x_np.shape[0] != external_weights_np.shape[0]:
+        raise RuntimeError('Dimensions of arrays x and weights do not match.')
+    
     cdef float64_t [:, :] x_v = x_np
     cdef float64_t [:] y_v = y_np
+    cdef float64_t [:] external_weights_v = external_weights_np
     
     cdef float64_t h[2]
     h[0], h[1] = bandwidth
@@ -160,6 +177,7 @@ def lowess2d(x, y, bandwidth):
             
             
             weight = (1 - sqrt(distance2) ** 3) ** 3
+            weight *= external_weights_v[i_current]
             
             sum_w += weight
             sum_wx0x1 += weight * x_trans[0] * x_trans[1]
@@ -199,7 +217,7 @@ def lowess2d(x, y, bandwidth):
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-def lowess2d_grid(x0, x1, y, bandwidth):
+def lowess2d_grid(x0, x1, y, bandwidth, weights=None):
     """Smooth a function of 2D data using LOWESS algorithm.
     
     Input values for the function are given on a grid.
@@ -212,6 +230,9 @@ def lowess2d_grid(x0, x1, y, bandwidth):
             the grid.  Axis 0 corresponds to x0, axis 1 to x1.
         bandwidth: array_like of length 2
             Bandwidths to be used for each coordinate.
+        weights:  Additional weights for LOWESS fit.  They should
+            normally be inversely proportional to squared uncertainties
+            associated with each point.
     
     Return value:
         A NumPy array with smoothed values of the function.
@@ -226,13 +247,18 @@ def lowess2d_grid(x0, x1, y, bandwidth):
     x0_np = np.asarray(x0, dtype=np.float64)
     x1_np = np.asarray(x1, dtype=np.float64)
     y_np = np.asarray(y, dtype=np.float64)
+    external_weights_np = np.asarray(weights, dtype=np.float64)
     
     if y_np.shape[0] != x0_np.shape[0] or y_np.shape[1] != x1_np.shape[0]:
-        raise RuntimeError('Dimenstions of array y do not match those of x0 and x1')
+        raise RuntimeError('Dimenstions of array y do not match those of x0 and x1.')
+    
+    if y_np.shape != external_weights_np.shape:
+        raise RuntimeError('Dimenstions of arrays y and weights do not match.')
     
     cdef float64_t [:] x0_v = x0_np
     cdef float64_t [:] x1_v = x1_np
     cdef float64_t [:, :] y_v = y_np
+    cdef float64_t [:, :] external_weights_v = external_weights_np
     
     cdef float64_t h[2]
     h[0] = bandwidth[0]
@@ -303,6 +329,7 @@ def lowess2d_grid(x0, x1, y, bandwidth):
                     
                     
                     weight = (1 - sqrt(distance2) ** 3) ** 3
+                    weight *= external_weights_v[i_current[0], i_current[1]]
                     
                     sum_w += weight
                     sum_wx0x1 += weight * x_trans[0] * x_trans[1]
