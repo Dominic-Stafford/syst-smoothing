@@ -11,134 +11,297 @@ import ROOT
 from lowess import lowess, lowess2d, lowess2d_grid
 
 
-class Reader:
-    """Facilitates reading of files with histograms.
+class ReaderBase:
+    """Facilitates reading of ROOT files with templates.
     
-    Histograms are supposed to be organized into directories
-    corresponding to channels.
+    Templates (represented with histograms) are supposed to be organized
+    into directories corresponding to channels.  Read templates are
+    provided to caller as NumPy arrays with the following axes: (0)
+    channel, (1) bin in angle, (2) bin in mass, (3) index distinguishing
+    between content of bin of original histogram or its squared
+    uncertainty.  This representation is also referred to as "counts".
+    
+    
+    This is an abstact base class.
     """
     
-    def __init__(self, fileName):
-        """Constructor from a file name."""
+    def __init__(self, file_name, channels=None):
+        """Initialize from a ROOT file with templates.
         
-        self.templateFile = ROOT.TFile(fileName)
+        Arguments:
+            file_name:  Path to a ROOT file with templates.
+            channels:  List with names of channels to read.  If None,
+                all channels found in the file are read.
+        """
         
+        self.templates_file = ROOT.TFile(file_name)
         
-        # Extract the list of channels
-        self.channels = []
-        
-        for key in self.templateFile.GetListOfKeys():
-            if key.GetClassName() == 'TDirectoryFile':
-                self.channels.append(key.GetName())
+        if channels:
+            self.channels = list(channels)
+        else:
+            # Extract the list of channels
+            self.channels = []
+            
+            for key in self.templates_file.GetListOfKeys():
+                if key.GetClassName() == 'TDirectoryFile':
+                    self.channels.append(key.GetName())
         
         
         # Extract the number of bins in histograms.  Since they all have
-        # the same shape, take one of the nominal histograms.  Count
-        # under- and overflow bins for the mass but not for the angle.
-        hist = self.templateFile.Get(self.channels[0] + '/Nominal')
-        self.nBinsMass = hist.GetNbinsX() + 2
-        self.nBinsAngle = hist.GetNbinsY()
-        self.nPartitions = hist.GetNbinsZ()
+        # the same shape, pick one.
+        hist = next(
+            key for key in self.templates_file.Get(self.channels[0]).GetListOfKeys()
+        ).ReadObj()
+        self.num_bins_mass, self.num_bins_angle = self._extract_dimensions(hist)
     
     
     def get_syst_names(self):
-        """Provide list of systematic uncertainties included in file."""
+        """Provide set of systematic uncertainties included in the file.
         
-        # Assume that the list of uncertainties is the same for all
-        # channels
-        systNames = []
+        Assume that uncertainties are the same for all channels.
+        """
         
-        for key in self.templateFile.Get(self.channels[0]).GetListOfKeys():
+        syst_names = set()
+        
+        for key in self.templates_file.Get(self.channels[0]).GetListOfKeys():
             name = key.GetName()
             
             if name.endswith('Up'):
-                systNames.append(name[:-2])
+                syst_names.add(name[:-2])
         
-        return systNames
+        return syst_names
+    
+    
+    def read_counts(self, name):
+        """Read templates with the given name.
+        
+        Arguments:
+            name:  Name that identifies requested set of histograms.
+        
+        Return value:
+            Templates in standard NumPy representation.
+        
+        Must be implemented in a derived class.
+        """
+        
+        raise NotImplemented
+    
+    
+    def _extract_dimensions(self, hist):
+        """Extract dimensions from given ROOT histogram.
+        
+        Arguments:
+            hist:  ROOT histogram.
+        
+        Return value:
+            Pair of numbers of bins along the mass and the angle axes.
+        
+        Must be implemented in a derived class.
+        """
+        
+        raise NotImplemented
+    
+    
+    def _zero_counts(self):
+        """Create empty (zero) template in NumPy representation."""
+        
+        return np.zeros((len(self.channels), self.num_bins_angle, self.num_bins_mass, 2))
+
+
+class ReaderCV(ReaderBase):
+    """Reader for files for cross-validation.
+    
+    Templates in input files are repesented with histograms in mass and
+    angle and have an additional dimension for the partition used in the
+    cross-validation procedure.
+    """
+    
+    def __init__(self, file_name, channels=None):
+        """Initialize from a ROOT file with templates.
+        
+        Delegate initialization to base class.
+        """
+        
+        super().__init__(file_name, channels)
     
     
     def read_counts_partitions(self, name, partitions):
-        """Read partitions from set of histograms.
+        """Read partitions from set of templates.
         
-        Read a set of histograms with the given name and merge requested
-        partitions.  Return a NumPy representation of the resulting
-        histogram.
+        Read a set of templates with the given name and merge requested
+        partitions.  Consider under- and overflows for the mass.
         
         Arguments:
             name:  Name that identifies the set of histograms.
             partitions:  List of zero-based indices of partitions to be
                 read.  The largest value must be smaller than
-                self.nPartitions.
+                self.num_partitions.
         
         Return value:
-            NumPy array describing the histogram.  Its indices have the
-            following meaning: (0) channel, (1) bin in angle, (2) bin in
-            mass, (3) index distinguishing between content of bin of
-            original histogram or its squared uncertainty.
+            Templates in the standard NumPy representation.
         """
         
-        counts = np.zeros((len(self.channels), self.nBinsAngle, self.nBinsMass, 2))
+        counts = self._zero_counts()
         
-        for iChannel, channel in enumerate(self.channels):
-            histName = '{}/{}'.format(channel, name)
-            hist = self.templateFile.Get(histName)
+        for i_channel, channel in enumerate(self.channels):
+            hist_name = '{}/{}'.format(channel, name)
+            hist = self.templates_file.Get(hist_name)
             
             if not hist:
-                raise RuntimeError('Failed to read histogram "{}".'.format(histName))
+                raise RuntimeError('Failed to read histogram "{}".'.format(hist_name))
             
-            for partition, binMass, binAngle in itertools.product(
+            for partition, bin_mass, bin_angle in itertools.product(
                 partitions, range(hist.GetNbinsX() + 2), range(1, hist.GetNbinsY() + 1)
             ):
-                counts[iChannel, binAngle - 1, binMass, 0] += \
-                    hist.GetBinContent(binMass, binAngle, partition + 1)
-                counts[iChannel, binAngle - 1, binMass, 1] += \
-                    hist.GetBinError(binMass, binAngle, partition + 1)**2
+                counts[i_channel, bin_angle - 1, bin_mass, 0] += \
+                    hist.GetBinContent(bin_mass, bin_angle, partition + 1)
+                counts[i_channel, bin_angle - 1, bin_mass, 1] += \
+                    hist.GetBinError(bin_mass, bin_angle, partition + 1) ** 2
         
         return counts
     
     
-    def read_counts_total(self, name):
-        """Read set of histograms with given name.
+    def read_counts(self, name):
+        """Read templates with the given name combining all partitions.
         
-        Same as read_counts but all partitions are merged together.
+        Implement the method from the base class.  Consider under- and
+        overflows for the mass.
         """
         
-        counts = np.empty((len(self.channels), self.nBinsAngle, self.nBinsMass, 2))
+        counts = self._zero_counts()
         
-        for iChannel, channel in enumerate(self.channels):
-            histName = '{}/{}'.format(channel, name)
-            hist = self.templateFile.Get(histName)
+        for i_channel, channel in enumerate(self.channels):
+            hist_name = '{}/{}'.format(channel, name)
+            hist = self.templates_file.Get(hist_name)
             
             if not hist:
-                raise RuntimeError('Failed to read histogram "{}".'.format(histName))
+                raise RuntimeError('Failed to read histogram "{}".'.format(hist_name))
             
-            hist.GetZaxis().SetRange(1, self.nPartitions)
-            hist2D = hist.Project3D('yx e')
-            hist2D.SetName(uuid4().hex)
-            hist2D.SetDirectory(None)
+            hist.GetZaxis().SetRange(1, self.num_partitions)
+            hist_2d = hist.Project3D('yx e')
+            hist_2d.SetName(uuid4().hex)
+            hist_2d.SetDirectory(None)
             
-            counts[iChannel] = self._hist_to_array(hist2D)
+            counts[i_channel] = self._hist_to_array(hist_2d)
         
         return counts
+    
+    
+    def _extract_dimensions(self, hist):
+        """Extract dimensions from given ROOT histogram.
+        
+        Implement the abstract method from the base class.  In addition
+        to extracting the numbers of bins along the mass and angle axes,
+        determine the number of partitions.  For the mass, under- and
+        overflows are considered as well.
+        """
+        
+        if hist.GetDimension() != 3:
+            raise RuntimeError('Template of unexpected dimension {}.'.format(hist.GetDimension()))
+        
+        num_bins_mass = hist.GetNbinsX() + 2
+        num_bins_angle = hist.GetNbinsY()
+        self.num_partitions = hist.GetNbinsZ()
+        
+        return num_bins_mass, num_bins_angle
     
     
     def _hist_to_array(self, hist):
         """Convert histogram of (mass, angle) into NumPy representation.
         
-        Return an array of shape (nBinsAngle, nBinsMass, 2), where the
-        last dimension includes bin contents and respective squared
-        errors.
+        Return an array of shape (num_bins_angle, num_bins_mass, 2),
+        where the last dimension includes bin contents and respective
+        squared errors.  Under- and overflows for mass are considered.
         """
         
-        counts = np.empty((self.nBinsAngle, self.nBinsMass, 2))
+        counts = np.empty((self.num_bins_angle, self.num_bins_mass, 2))
         
-        for binAngle, binMass in itertools.product(
+        for bin_angle, bin_mass in itertools.product(
             range(1, hist.GetNbinsY() + 1), range(hist.GetNbinsX() + 2)
         ):
-            counts[binAngle - 1, binMass, 0] = hist.GetBinContent(binMass, binAngle)
-            counts[binAngle - 1, binMass, 1] = hist.GetBinError(binMass, binAngle)**2
+            counts[bin_angle - 1, bin_mass, 0] = hist.GetBinContent(bin_mass, bin_angle)
+            counts[bin_angle - 1, bin_mass, 1] = hist.GetBinError(bin_mass, bin_angle) ** 2
         
         return counts
+
+
+
+class ReaderUnrolled(ReaderBase):
+    """Reader for templates represented by unrolled histograms.
+    
+    Templates in input files are represented with originally 2D
+    histograms in (mass, angle) that have been unrolled into 1D with the
+    mass index running in the inner loop, i.e. all mass bins for one
+    angular bin are put side by side, they are followed by all mass bins
+    for the next angular bin, and so on.
+    """
+    
+    def __init__(self, file_name, num_bins_angle, channels=None):
+        """Initialize from a ROOT file with templates.
+        
+        Arguments:
+            file_name:  Path to the ROOT file with templates.
+            num_bins_angle:  Number of bins along the angle axis.
+            channels:  List of channels to read.  See documentation for
+                the base class.
+        """
+        
+        self.num_bins_angle = num_bins_angle
+        super().__init__(file_name, channels)
+    
+    
+    def read_counts(self, name):
+        """Read templates with the given name combining all partitions.
+        
+        Implement the method from the base class.
+        """
+        
+        counts = self._zero_counts()
+        
+        for ichannel, channel in enumerate(self.channels):
+            read_name = '{}/{}'.format(channel, name)
+            template = self.src_file.Get(read_name)
+            
+            if not template:
+                raise RuntimeError('Failed to read template "{}".'.format(read_name))
+            
+            counts[ichannel] = self._hist_to_array(template)
+        
+        return counts
+    
+    
+    def _extract_dimensions(self, hist):
+        """Extract dimensions from given ROOT histogram.
+        
+        Implement the abstract method from the base class.
+        """
+        
+        if hist.GetDimension() != 1:
+            raise RuntimeError('Template of unexpected dimension {}.'.format(hist.GetDimension()))
+        
+        if hist.GetNbinsX() % self.num_bins_angle != 0:
+            raise RuntimeError(
+                'Total number of bins is not aligned with given number of bins along the angle axis'
+            )
+        
+        return hist.GetNbinsX() // self.num_bins_angle, self.num_bins_angle
+    
+    
+    def _hist_to_array(self, hist):
+        """Convert unrolled histogram into NumPy representation.
+        
+        Return an array of shape (num_bins_angle, num_bins_mass, 2),
+        where the last dimension includes bin contents and respective
+        squared errors.
+        """
+        
+        counts_flat = np.empty((hist.GetNbinsX(), 2))
+        
+        for i in range(len(counts_flat)):
+            counts_flat[i, 0] = hist.GetBinContent(i + 1)
+            counts_flat[i, 1] = hist.GetBinError(i + 1) ** 2
+        
+        return counts_flat.reshape(self.num_bins_angle, self.num_bins_mass, 2)
 
 
 
@@ -277,7 +440,7 @@ class RepeatedCV:
         
         # Order in which partitions will be iterated during
         # cross-validation
-        self.partitions = list(range(reader.nPartitions))
+        self.partitions = list(range(reader.num_partitions))
         
         # Current partitions that constituent current test set and
         # corresponding counts for booked histograms
@@ -298,7 +461,7 @@ class RepeatedCV:
                 # Already booked.  No need to read again.
                 newTotalCounts[name] = self.totalCounts[name]
             else:
-                newTotalCounts[name] = self.reader.read_counts_total(name)
+                newTotalCounts[name] = self.reader.read_counts(name)
         
         self.totalCounts = newTotalCounts
     
@@ -385,7 +548,7 @@ class Smoother:
         Arguments:
             nominal, up, down:  Reference templates with fine binning.
                 They must respect the format adopted in Reader, i.e.
-                their shapes must be (nChannels, nBinsAngle, nBinsMass,
+                their shapes must be (nChannels, num_bins_angle, num_bins_mass,
                 2).
             rebinner:  An instance of RebinnerND
             nominalRebinned, upRebinned, downRebinned:  Reference
@@ -410,7 +573,7 @@ class Smoother:
         # averaged over channels and up and down variations.  The sign
         # is chosen in such a way that obtained deviation corresponds to
         # the up variation.  The shape of produced array is
-        # (nBinsAngle, nBinsMass).
+        # (num_bins_angle, num_bins_mass).
         self.averageDeviation = (np.sum(up[..., 0], axis=0) - np.sum(down[..., 0], axis=0)) / 2 / \
             np.sum(nominal[..., 0], axis=0)
         
@@ -449,8 +612,8 @@ class Smoother:
         
         Return value:
             A pair of templates that represent up and down smoothed
-            variations.  Their shapes are (nChannels, nBinsAngle,
-            nBinsMass, 2).  The uncertainty is computed from the
+            variations.  Their shapes are (nChannels, num_bins_angle,
+            num_bins_mass, 2).  The uncertainty is computed from the
             uncertainty of the nominal template.
         
         Add to 'self' smoothed averaged relative deviation and scale
@@ -492,12 +655,12 @@ class Smoother:
         
         Arguments:
             deviation:  Relative deviation to be applied.  Its shape is
-                (nBinsAngle, nBinsMass).
+                (num_bins_angle, num_bins_mass).
             scaleFactor:  Optional scale factor to rescale deviation.
         
         Return value:
             New systematic template determined by the given deviation.
-            Its shape is (nChannels, nBinsAngle, nBinsMass, 2).
+            Its shape is (nChannels, num_bins_angle, num_bins_mass, 2).
         """
         
         totalScaling = 1 + scaleFactor * deviation
@@ -605,15 +768,15 @@ class Smoother:
         mass bins.
         """
         
-        nBinsAngle = self.nominal.shape[1]
+        num_bins_angle = self.nominal.shape[1]
         
         
         # Smooth the deviation in each angular bin independently
         smoothAverageDeviation = np.empty_like(self.averageDeviation)
         
-        for binAngle in range(nBinsAngle):
-            deviationSlice = self.averageDeviation[binAngle]
-            smoothAverageDeviation[binAngle] = lowess(
+        for bin_angle in range(num_bins_angle):
+            deviationSlice = self.averageDeviation[bin_angle]
+            smoothAverageDeviation[bin_angle] = lowess(
                 range(len(deviationSlice)), deviationSlice, bandwidth
             )
         
