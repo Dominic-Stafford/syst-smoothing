@@ -129,7 +129,7 @@ class Processor(mp.Process):
                         self.repeatedCV.get_counts_train('Nominal'),
                         self.repeatedCV.get_counts_train(systName + 'Up'),
                         self.repeatedCV.get_counts_train(systName + 'Down'),
-                        self.rebinner, nominalRebinned=nominalTrainRebinned
+                        self.rebinner
                     )
                     
                     # Perform smoothing and compute error for each
@@ -140,8 +140,7 @@ class Processor(mp.Process):
                             (
                                 bandwidth[0] * self.reader.nBinsAngle,
                                 bandwidth[1] * self.reader.nBinsMass
-                            ),
-                            rebin=True
+                            )
                         )
                         error = self.compute_error(
                             nominalTrainRebinned, (smoothUpRebinned, smoothDownRebinned),

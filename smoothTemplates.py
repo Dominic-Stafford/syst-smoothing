@@ -153,40 +153,38 @@ if __name__ == '__main__':
         bandwidth = optimalBandwidths[systName]
         
         smoother = Smoother(
-            nominalCounts, systCounts['up'], systCounts['down'], rebinner,
-            nominalRebinned=nominalCountsRebinned
+            nominalCounts, systCounts['up'], systCounts['down'], rebinner
         )
         systCountsSmoothRebinned = {}
         systCountsSmoothRebinned['up'], systCountsSmoothRebinned['down'] = \
             smoother.smooth(
-                (bandwidth[0] * nBinsAngle, bandwidth[1] * nBinsMass),
-                rebin=True
+                (bandwidth[0] * nBinsAngle, bandwidth[1] * nBinsMass)
             )
         
         # An alias for automatically constructed rebinned systematic
         # templates
         systCountsRebinned = {
-            'up': smoother.systsRebinned[0],
-            'down': smoother.systsRebinned[1]
+            'up': smoother.systs_bin_sf[0],
+            'down': smoother.systs_bin_sf[1]
         }
         
         print('  Scale factors fitted independently')
         print('    "up": {:+.2f} +- {:.2f}, "down": {:+.2f} +- {:.2f}'.format(
-            *smoother.rawScaleFactors[0], *smoother.rawScaleFactors[1]
+            *smoother.raw_scale_factors[0], *smoother.raw_scale_factors[1]
         ))
         print('  Final scale factors')
-        print('    "up": {:+.2f}, "down": {:+.2f}'.format(*smoother.scaleFactors))
+        print('    "up": {:+.2f}, "down": {:+.2f}'.format(*smoother.scale_factors))
         
         
         # Plot averaged smoothed deviations in each angular bin (with
         # the dense binning also in the angle)
-        for binAngle in range(smoother.averageDeviation.shape[0]):
+        for binAngle in range(smoother.average_deviation.shape[0]):
             
             fig = plt.figure()
             axes = fig.add_subplot(111)
             
-            axes.plot(smoother.averageDeviation[binAngle], color='black', label='Original')
-            axes.plot(smoother.smoothAverageDeviation[binAngle], color='C1', label='Smoothed')
+            axes.plot(smoother.average_deviation[binAngle], color='black', label='Original')
+            axes.plot(smoother.smooth_average_deviation[binAngle], color='C1', label='Smoothed')
             
             axes.axhline(0., color='gray', lw=0.8, ls='dashed')
             axes.margins(x=0.)

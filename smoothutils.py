@@ -2,6 +2,7 @@
 
 import itertools
 import math
+from operator import itemgetter
 from uuid import uuid4
 
 import numpy as np
@@ -306,50 +307,80 @@ class ReaderUnrolled(ReaderBase):
 
 
 class Rebinner1D:
-    """A class to rebin NumPy arrays along an axis."""
+    """An auxiliary class to rebin NumPy arrays along an axis.
     
-    def __init__(self, sourceBinning, targetBinning, axis=None):
-        """Constructor from source and target binnings.
+    The array is supposed to represent a histogram of event counts with
+    uncertainties.
+    """
+    
+    def __init__(self, source_binning, target_binning, axis=None):
+        """Initialize from source and target binnings.
         
-        The binnings must satisfy certain requirements listed for
-        _build_rebin_map.
+        Arguments:
+            source_binning, target_binning:  Source and target binnings.
+                Mist satisfy requirements listed for _build_rebin_map.
+            axis:  Axis along which the rebinning is to be performed.
         """
         
-        self.rebinMap = self._build_rebin_map(sourceBinning, targetBinning)
-        self.defaultAxis = axis
+        self.rebin_map = self._build_rebin_map(source_binning, target_binning)
+        self.axis = axis
     
     
     def __call__(self, array, axis=None):
         """Create a new array with target binning along given axis."""
         
         if axis is None:
-            axis = self.defaultAxis
+            axis = self.axis
         
         if axis is None:
-            raise RuntimeError('No axis provided')
+            raise RuntimeError('No axis provided.')
         
         
-        rebinnedShape = list(array.shape)
-        rebinnedShape[axis] = len(self.rebinMap) - 1
+        rebinned_shape = list(array.shape)
+        rebinned_shape[axis] = len(self.rebin_map) - 1
         
-        rebinnedArray = np.zeros(rebinnedShape, dtype=array.dtype)
+        rebinned_array = np.zeros(rebinned_shape, dtype=array.dtype)
         
-        for i in range(len(self.rebinMap) - 1):
+        for i in range(len(self.rebin_map) - 1):
             
-            # An indexing object that selects a slice of rebinnedArray
+            # An indexing object that selects a slice of rebinned_array
             # at index i along the given axes
             index = tuple([slice(None)] * axis + [i, ...])
             
-            rebinnedArray[index] = np.sum(
-                np.take(array, range(self.rebinMap[i], self.rebinMap[i + 1]), axis=axis),
+            rebinned_array[index] = np.sum(
+                np.take(array, range(self.rebin_map[i], self.rebin_map[i + 1]), axis=axis),
                 axis=axis
             )
         
-        return rebinnedArray
+        return rebinned_array
+    
+    
+    def translate_index(self, index_source):
+        """Map bin in source binning into target binning.
+        
+        Arguments:
+            index_source:  Index of the bin in the source binning.
+                Negative values are allowed.
+        
+        Return value:
+            Index of the bin in the target binning to which the given
+            bin maps.
+        """
+        
+        num_bins = self.rebin_map[-1]
+        
+        # Allow for negative indices as usual
+        if index_source < 0:
+            index_source += num_bins
+        
+        if index_source >= num_bins:
+            raise IndexError
+        
+        return np.searchsorted(self.rebin_map, index_source, 'right') - 1
     
     
     @staticmethod
-    def _build_rebin_map(sourceBinning, targetBinning):
+    def _build_rebin_map(source_binning, target_binning):
         """Construct mapping between source and target binning.
         
         Assume that all elements of the target binning are included into
@@ -361,24 +392,24 @@ class Rebinner1D:
         target binning.
         """
         
-        sourceBinning = np.asarray(sourceBinning)
-        targetBinning = np.asarray(targetBinning)
+        source_binning = np.asarray(source_binning)
+        target_binning = np.asarray(target_binning)
         
         
         # Use half of the width of the narrowest bin in the source
         # binning to match the binnings
-        eps = np.min(sourceBinning[1:] - sourceBinning[:-1]) / 2
+        eps = np.min(source_binning[1:] - source_binning[:-1]) / 2
         
-        startIndicesTarget = [0]
+        start_indices_target = [0]
         
-        for edge in targetBinning[1:-1]:
-            startIndicesTarget.append(np.searchsorted(sourceBinning, edge + eps) - 1)
+        for edge in target_binning[1:-1]:
+            start_indices_target.append(np.searchsorted(source_binning, edge + eps) - 1)
         
         # The last element is the number of bins in the source binning
         # (which is one smaller than the number of edges)
-        startIndicesTarget.append(len(sourceBinning) - 1)
+        start_indices_target.append(len(source_binning) - 1)
         
-        return startIndicesTarget
+        return start_indices_target
 
 
 
@@ -406,12 +437,36 @@ class RebinnerND:
     def __call__(self, array):
         """Create a new rebinned array."""
         
-        rebinnedArray = array
+        rebinned_array = array
         
         for rebinner in self.rebinners:
-            rebinnedArray = rebinner(rebinnedArray)
+            rebinned_array = rebinner(rebinned_array)
         
-        return rebinnedArray
+        return rebinned_array
+    
+    
+    def translate_index(self, index_source):
+        """Map bin in source binning into target binning.
+        
+        If for some axes to rebinners are available, bin indices along
+        them are left unchanged.
+        
+        Arguments:
+            index_source:  Multidimensional index of the bin in the
+                source binning.  Negative values are allowed.
+        
+        Return value:
+            Multidimensional index of the bin in the target binning to
+            which the given bin maps.
+        """
+        
+        index_target = list(index_source)
+        
+        for rebinner in self.rebinners:
+            axis = rebinner.axis
+            index_target[axis] = rebinner.translate_index(index_source[axis])
+        
+        return tuple(index_target)
 
 
 
@@ -536,70 +591,96 @@ class RepeatedCV:
 
 
 class Smoother:
-    """A class to smooth systematic variations."""
+    """A class to smooth systematic variations.
+    
+    The relative deviation from the nominal template is averaged over
+    all channels as well as up and down variations (taking into account
+    the inversion in the shape) and then smoothed with a version of
+    LOWESS algorithm.  After that, independent overall scale factors are
+    applied to the smoothed relative deviation in each channel and for
+    each direction.  If the scale factors for up and down variations are
+    compatible within their uncertainties (apart from the sign), a
+    combined scale factor is used instead.
+    
+    The procedure use templates with two binnings in the angle and mass,
+    which are related by an instance of RebinnerND.  There are two modes
+    of operation, controlled by a flag given at initialization.  The
+    first mode is to use the fine binning for smoothing.  The overall
+    scale factors are computed with the coarse binning (which in this
+    case corresponds to the binning used in the statistical analysis).
+    Final smoothed systematic variations are also rebinned for this
+    coarse binning.  The second mode is to apply the rebinning before
+    the smoothing.  This is useful when the number of available events
+    is too small to construct the smoothed relative deviation reliably.
+    As before, the overall scale factors are computed with the coarse
+    binning.  The final smoothed systematic variations are upscaled to
+    the fine binning.
+    """
     
     def __init__(
-        self, nominal, up, down, rebinner,
-        nominalRebinned=None, upRebinned=None, downRebinned=None,
-        sfCombThreshold=1.
+        self, nominal, up, down, rebinner, rebin_for_smoothing=False, sf_comb_threshold=1.
     ):
         """Constructor from reference templates.
         
         Arguments:
             nominal, up, down:  Reference templates with fine binning.
-                They must respect the format adopted in Reader, i.e.
-                their shapes must be (nChannels, num_bins_angle, num_bins_mass,
-                2).
-            rebinner:  An instance of RebinnerND
-            nominalRebinned, upRebinned, downRebinned:  Reference
-                templates rebinned for the analysis binning.  Any of
-                these arguments can be None.  In this case rebinned
-                template is constructed automatically.
-            sfCombThreshold:  If the difference between scale factors
+                They must respect the format adopted in ReaderBase, i.e.
+                their shapes must be (num_channels, num_bins_angle,
+                num_bins_mass, 2).
+            rebinner:  An instance of RebinnerND that implements the
+                mapping to the coarse binning.
+            rebin_for_smoothing:  Determines whether the smoothing
+                should be performed with rebinned templates.
+            sf_comb_threshold:  If the difference between scale factors
                 for up and down (with flipped sign) variations computed
                 independently is smaller than their combined uncertainty
                 multiplied by the given factor, will use the same scale
                 factor for both (up to the sign).
-        
-        The rebinner is needed to compute scale factors using a coarser
-        binning.
         """
         
-        self.nominal = nominal
-        self.systs = (up, down)
+        # Save templates in the binning intended for smoothing.  Also
+        # store the original nominal template.
+        if rebin_for_smoothing:
+            self.nominal_input = nominal
+            self.nominal = rebinner(nominal)
+            self.up = rebinner(up)
+            self.down = rebinner(down)
+        else:
+            self.nominal_input = nominal
+            self.nominal = nominal
+            self.up = up
+            self.down = down
+        
         self.rebinner = rebinner
+        self.rebin_for_smoothing = rebin_for_smoothing
+        
         
         # Precompute relative deviation from the nominal template,
         # averaged over channels and up and down variations.  The sign
         # is chosen in such a way that obtained deviation corresponds to
         # the up variation.  The shape of produced array is
         # (num_bins_angle, num_bins_mass).
-        self.averageDeviation = (np.sum(up[..., 0], axis=0) - np.sum(down[..., 0], axis=0)) / 2 / \
-            np.sum(nominal[..., 0], axis=0)
-        
-        self.smoothAverageDeviation = None
+        self.average_deviation = 0.5 * np.sum(self.up[..., 0] - self.down[..., 0], axis=0) / \
+            np.sum(self.nominal[..., 0], axis=0)
         
         
-        # Precompute rebinned templates if needed
-        if nominalRebinned is None:
-            self.nominalRebinned = rebinner(nominal)
+        # Precompute templates with the binning used for the computation
+        # of the overall scale factors
+        if rebin_for_smoothing:
+            self.nominal_bin_sf = self.nominal
+            self.systs_bin_sf = (self.up, self.down)
         else:
-            self.nominalRebinned = nominalRebinned
+            self.nominal_bin_sf = rebinner(self.nominal)
+            self.systs_bin_sf = (rebinner(self.up), rebinner(self.down))
         
-        if upRebinned is None:
-            upRebinned = rebinner(up)
-        
-        if downRebinned is None:
-            downRebinned = rebinner(down)
-        
-        self.systsRebinned = (upRebinned, downRebinned)
+        self.smooth_average_deviation = None
         
         
-        self.sfCombThreshold = sfCombThreshold
-        self.scaleFactors, self.rawScaleFactors = None, None
+        self.sf_comb_threshold = sf_comb_threshold
+        self.scale_factors, self.raw_scale_factors = None, None
             
 
-    def smooth(self, bandwidth, algo='2D', rebin=False):
+    def smooth(self, bandwidth, algo='2D'):
         """Perform LOWESS smoothing using given bandwidth.
         
         Arguments:
@@ -607,12 +688,10 @@ class Smoother:
                 depends on the algorithm, see documentation for
                 respective methods.
             algo:  Smoothing algorithm.  Supported are '2D' and 'mass'.
-            rebin:  Controls whether returned templates use the fine
-                or analysis-level binning.
         
         Return value:
             A pair of templates that represent up and down smoothed
-            variations.  Their shapes are (nChannels, num_bins_angle,
+            variations.  Their shapes are (num_channels, num_bins_angle,
             num_bins_mass, 2).  The uncertainty is computed from the
             uncertainty of the nominal template.
         
@@ -622,9 +701,9 @@ class Smoother:
         
         # Construct smoothed average deviation
         if algo == '2D':
-            self.smoothAverageDeviation = self._smooth_impl_2d(bandwidth)
+            self.smooth_average_deviation = self._smooth_impl_2d(bandwidth)
         elif algo == 'mass':
-            self.smoothAverageDeviation = self._smooth_impl_mass(bandwidth)
+            self.smooth_average_deviation = self._smooth_impl_mass(bandwidth)
         else:
             raise RuntimeError('Unknown algorithm "{}".'.format(algo))
         
@@ -634,49 +713,93 @@ class Smoother:
         
         
         # Construct smoothed systematic templates
-        smoothTemplates = (
-            self._apply_deviation(self.smoothAverageDeviation, scaleFactor=self.scaleFactors[0]),
-            self._apply_deviation(self.smoothAverageDeviation, scaleFactor=self.scaleFactors[1])
-        )
-        
-        if rebin:
-            return (
-                self.rebinner(smoothTemplates[0]),
-                self.rebinner(smoothTemplates[1])
+        if self.rebin_for_smoothing:
+            # Apply smooth deviation obtained with the coarse binning to
+            # the input nominal template, which has a finer binning
+            systs_smooth = (
+                self._apply_deviation(
+                    self.nominal_input, self.smooth_average_deviation,
+                    scale_factor=self.scale_factors[0]
+                ),
+                self._apply_deviation(
+                    self.nominal_input, self.smooth_average_deviation,
+                    scale_factor=self.scale_factors[1]
+                )
             )
-        else:
-            return smoothTemplates
-    
-    
-    def _apply_deviation(self, deviation, scaleFactor=1.):
-        """Apply given deviation to nominal template.
+            
+            return systs_smooth
         
-        Use the same deviation for all channels.
+        else:
+            # Apply smooth deviation obtained with the dense binning to
+            # the input nominal template, which has the same binning.
+            # Then rebin thus constructed smooth systematic variations.
+            systs_smooth = (
+                self._apply_deviation(
+                    self.nominal, self.smooth_average_deviation, scale_factor=self.scale_factors[0]
+                ),
+                self._apply_deviation(
+                    self.nominal, self.smooth_average_deviation, scale_factor=self.scale_factors[1]
+                )
+            )
+            
+            return (
+                self.rebinner(systs_smooth[0]),
+                self.rebinner(systs_smooth[1])
+            )
+    
+    
+    def _apply_deviation(self, nominal, deviation, scale_factor=1.):
+        """Apply relative deviation to given nominal template.
+        
+        Use the same deviation for all channels.  The deviation can be
+        given with a coarser binning in angle and mass than used in the
+        nominal template.  In that case assume that the two binnings are
+        related by self.rebinner.
         
         Arguments:
+            nominal:  Nominal template.  Its shape is (num_bins_angle,
+                num_bins_mass).
             deviation:  Relative deviation to be applied.  Its shape is
-                (num_bins_angle, num_bins_mass).
-            scaleFactor:  Optional scale factor to rescale deviation.
+                (num_bins_angle, num_bins_mass), but there might be
+                fewer bins along each axis than in the nominal template.
+            scale_factor:  Optional scale factor to rescale deviation.
         
         Return value:
             New systematic template determined by the given deviation.
-            Its shape is (nChannels, num_bins_angle, num_bins_mass, 2).
+            Its shape is (num_channels, num_bins_angle, num_bins_mass,
+            2), where numbers of bins along angle and mass axes are
+            given by the nominal template.
         """
         
-        totalScaling = 1 + scaleFactor * deviation
-        totalScaling2 = totalScaling**2
+        if nominal.shape[1:3] != deviation.shape:
+            # Numbers of bins along angle and mass axes in the given
+            # nominal template do not match ones in the deviation.  The
+            # deviation mush have been computed with a coarser binning.
+            # Upscale it by duplicating bins.
+            deviation_coarse = deviation
+            deviation = np.empty(nominal.shape[1:3])
+            
+            for bin_angle, bin_mass in itertools.product(
+                range(nominal.shape[1]), range(nominal.shape[2])
+            ):
+                deviation[bin_angle, bin_mass] = deviation_coarse(
+                    self.rebinner.translate_index((bin_angle, bin_mass))
+                )
+            
         
-        template = np.copy(self.nominal)
+        total_scaling = 1 + scale_factor * deviation
+        total_scaling_sq = total_scaling ** 2
+        
+        template = np.copy(nominal)
         
         # Apply the same deviation to each channel
-        for channelTemplate in template:
+        for channel_template in template:
             
             # Rescale central values
-            channelTemplate[..., 0] *= totalScaling
+            channel_template[..., 0] *= total_scaling
             
             # Quadratic scaling for squared uncertainties
-            channelTemplate[..., 1] *= totalScaling2
-        
+            channel_template[..., 1] *= total_scaling_sq
         
         return template
     
@@ -688,7 +811,8 @@ class Smoother:
         between the systematic templates and ones obtained by applying
         the smoothed deviation, rescaled by that factors, to the nominal
         template.  The scale factor is the same for all bins.  Different
-        channels are not summed up.  Computed with analysis binning.
+        channels are not summed up.  Computed with the binning used for
+        smoothing.
         
         If the scale factors computed independently for up and down
         variations are compatible with each other (up to the sign)
@@ -703,9 +827,15 @@ class Smoother:
             None.
         """
         
-        systSmoothRebinned = self.rebinner(
-            self._apply_deviation(self.smoothAverageDeviation)
-        )
+        # Construct template for smooth up variation with the overall
+        # scale factor of 1.  This is an auxiliary template needed for
+        # the computation of the actual scale factors.
+        up_smooth = self._apply_deviation(self.nominal, self.smooth_average_deviation)
+        
+        if not self.rebin_for_smoothing:
+            # Smoothing has been performed with the dense binning.  Then
+            # rebin the template now.
+            up_smooth = self.rebinner(up_smooth)
         
         
         # Precompute pieces needed to compute scale factors for up and
@@ -713,32 +843,32 @@ class Smoother:
         # their uncertainties are 1 / sqrt(b).
         a, b = np.empty(2), np.empty(2)
         
-        for iDirection in range(2):
-            absDeviation = self.systsRebinned[iDirection][..., 0] - self.nominalRebinned[..., 0]
-            absSmoothDeviation = systSmoothRebinned[..., 0] - self.nominalRebinned[..., 0]
+        for direction in range(2):
+            abs_deviation = self.systs_bin_sf[direction][..., 0] - self.nominal_bin_sf[..., 0]
+            abs_smooth_deviation = up_smooth[..., 0] - self.nominal_bin_sf[..., 0]
             
             # Combined squared uncertainty
-            unc2 = self.systsRebinned[iDirection][..., 1] + systSmoothRebinned[..., 1]
+            unc2 = self.systs_bin_sf[direction][..., 1] + up_smooth[..., 1]
             
             # Computed using analytical results
-            a[iDirection] = np.sum(absDeviation * absSmoothDeviation / unc2)
-            b[iDirection] = np.sum(absSmoothDeviation**2 / unc2)
+            a[direction] = np.sum(abs_deviation * abs_smooth_deviation / unc2)
+            b[direction] = np.sum(abs_smooth_deviation ** 2 / unc2)
         
         
         # Store independent scale factors for bookkeeping
-        self.rawScaleFactors = [(a[i] / b[i], 1 / math.sqrt(b[i])) for i in range(2)]
+        self.raw_scale_factors = [(a[i] / b[i], 1 / math.sqrt(b[i])) for i in range(2)]
         
         
         # If the two scale factors are compatible (except for the sign),
         # use a combined one instead
-        if (self.rawScaleFactors[0][0] + self.rawScaleFactors[1][0]) ** 2 < \
-            self.sfCombThreshold ** 2 * (1 / b[0] + 1 / b[1]):
+        if (self.raw_scale_factors[0][0] + self.raw_scale_factors[1][0]) ** 2 < \
+            self.sf_comb_threshold ** 2 * (1 / b[0] + 1 / b[1]):
             
             sf = (a[0] - a[1]) / (b[0] + b[1])
-            self.scaleFactors = (sf, -sf)
+            self.scale_factors = (sf, -sf)
         
         else:
-            self.scaleFactors = (self.rawScaleFactors[0][0], self.rawScaleFactors[1][0])
+            self.scale_factors = (self.raw_scale_factors[0][0], self.raw_scale_factors[1][0])
             
     
     
@@ -750,14 +880,14 @@ class Smoother:
         along the dimensions of the angle and mass (in this order).
         """
         
-        smoothAverageDeviation = lowess2d_grid(
+        smooth_average_deviation = lowess2d_grid(
             np.arange(0., self.nominal.shape[1], dtype=np.float64),
             np.arange(0., self.nominal.shape[2], dtype=np.float64),
-            self.averageDeviation,
+            self.average_deviation,
             bandwidth
         )
         
-        return smoothAverageDeviation
+        return smooth_average_deviation
     
     
     def _smooth_impl_mass(self, bandwidth):
@@ -772,12 +902,12 @@ class Smoother:
         
         
         # Smooth the deviation in each angular bin independently
-        smoothAverageDeviation = np.empty_like(self.averageDeviation)
+        smooth_average_deviation = np.empty_like(self.average_deviation)
         
         for bin_angle in range(num_bins_angle):
-            deviationSlice = self.averageDeviation[bin_angle]
-            smoothAverageDeviation[bin_angle] = lowess(
-                range(len(deviationSlice)), deviationSlice, bandwidth
+            deviation_slice = self.average_deviation[bin_angle]
+            smooth_average_deviation[bin_angle] = lowess(
+                range(len(deviation_slice)), deviation_slice, bandwidth
             )
         
-        return smoothAverageDeviation
+        return smooth_average_deviation
