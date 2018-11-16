@@ -326,6 +326,17 @@ class Rebinner1D:
         self.axis = axis
     
     
+    @classmethod
+    def from_map(cls, rebin_map, axis):
+        """Construct from a rebin map."""
+        
+        self = cls.__new__(cls)
+        self.rebin_map = rebin_map
+        self.axis = axis
+        
+        return self
+    
+    
     def __call__(self, array, axis=None):
         """Create a new array with target binning along given axis."""
         
@@ -467,6 +478,103 @@ class RebinnerND:
             index_target[axis] = rebinner.translate_index(index_source[axis])
         
         return tuple(index_target)
+
+
+
+class AdaptiveRebinner(RebinnerND):
+    """Adaptive version of RebinnerND.
+    
+    Construct the rebin map using a reference template.  Its bins are
+    merged recursively (while respecting the rectangular grid) until the
+    maximal relative uncertainty computed for the sum of all channels
+    becomes smaller than a given threshold.
+    """
+    
+    def __init__(self, template, max_rel_unc=0.1):
+        """Initialize from reference template.
+        
+        Arguments:
+            template:  A template in the standard representation used
+                by Reader classes, on which the binning is tuned.
+            max_rel_unc:  Maximal relative uncertainty in a bin (after
+                summing all channels) that determines the stopping
+                condition for the optimization.
+        """
+        
+        if template.ndim != 4:
+            raise RuntimeError('Unexpected dimensionality {}.'.format(template.ndim))
+        
+        
+        self.rebinners = [
+            Rebinner1D.from_map(list(range(template.shape[1] + 1)), 1),  # Angle
+            Rebinner1D.from_map(list(range(template.shape[2] + 1)), 2)   # Mass
+        ]
+        
+        template_rebinned = template
+        
+        while True:
+            # Compute (squared) relative uncertainties for the sum over
+            # channels
+            template_rebinned_sum_channels = np.sum(template_rebinned, axis=0)
+            
+            with np.errstate(divide='ignore'):
+                rel_unc_sq = template_rebinned_sum_channels[..., 1] / \
+                    template_rebinned_sum_channels[..., 0] ** 2
+            
+            rel_unc_sq[np.isnan(rel_unc_sq)] = np.inf
+            
+            
+            # Find bin with largest uncertainty
+            cur_max_unc_index = np.unravel_index(np.argmax(rel_unc_sq), rel_unc_sq.shape)
+            
+            if rel_unc_sq[cur_max_unc_index] < max_rel_unc ** 2:
+                # The procedure has terminated
+                break
+            
+            
+            # Find which of the four direct neighbour bins has the
+            # largest uncertainty
+            neighbours = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+            neighbour_unc_sq = np.zeros(4)
+            
+            for i in range(len(neighbours)):
+                neighbour_index = tuple(
+                    np.asarray(cur_max_unc_index) + np.asarray(neighbours[i])
+                )
+                
+                # Skip neighbours clipped by the boundary
+                if not (
+                    0 <= neighbour_index[0] < rel_unc_sq.shape[0] and
+                    0 <= neighbour_index[1] < rel_unc_sq.shape[1]
+                ):
+                    continue
+                
+                neighbour_unc_sq[i] = rel_unc_sq[neighbour_index]
+            
+            cur_max_unc_neighbour = neighbours[np.argmax(neighbour_unc_sq)]
+            
+            
+            # Update the rebin map
+            if cur_max_unc_neighbour[0] == 0:
+                # Merging two mass bins
+                if cur_max_unc_neighbour[1] > 0:
+                    del self.rebinners[1].rebin_map[cur_max_unc_index[1] + 1]
+                else:
+                    del self.rebinners[1].rebin_map[cur_max_unc_index[1]]
+            else:
+                # Merging two angle bins
+                if cur_max_unc_neighbour[0] > 0:
+                    del self.rebinners[0].rebin_map[cur_max_unc_index[0] + 1]
+                else:
+                    del self.rebinners[0].rebin_map[cur_max_unc_index[0]]
+            
+            
+            # Rebin the template
+            template_rebinned = self(template)
+            
+            if template_rebinned.shape == (1, 1):
+                # Cannot rebin any further: there is only one bin left
+                break
 
 
 
@@ -911,3 +1019,41 @@ class Smoother:
             )
         
         return smooth_average_deviation
+
+
+
+if __name__ == '__main__':
+    
+    # Tests for AdaptiveRebinner
+    def print_rel_unc(template):
+        template_sum_channels = np.sum(template, axis=0)
+        print(np.sqrt(template_sum_channels[..., 1]) / template_sum_channels[..., 0])
+    
+    def print_rebin_map(rebinner):
+        for r in rebinner.rebinners:
+            print(r.rebin_map, end=' ')
+        print()
+    
+    template = np.empty((2, 2, 5, 2))
+    template[..., 0] = 1.
+    
+    for bin_channel, bin_angle in itertools.product(
+        range(template.shape[0]), range(template.shape[1])
+    ):
+        template[bin_channel, bin_angle, :, 1] = np.asarray([0.01, 0.05, 0.1, 0.2, 0.5]) ** 2
+    
+    rebinner = AdaptiveRebinner(template)
+    print_rel_unc(template)
+    print_rebin_map(rebinner)
+    print_rel_unc(rebinner(template))
+    print()
+    
+    
+    template[0, 1, 4, :] = [0., 0.]
+    template[1, 1, 4, :] = [0., 0.]
+    
+    rebinner = AdaptiveRebinner(template)
+    print_rel_unc(template)
+    print_rebin_map(rebinner)
+    print_rel_unc(rebinner(template))
+    print()
