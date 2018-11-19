@@ -602,20 +602,20 @@ class RepeatedCV:
     multiple times after reshuffling data.
     """
     
-    def __init__(self, reader, kCV):
+    def __init__(self, reader, k_cv):
         """Constructor from a reader object and number of CV partitions.
         
         Arguments:
-            reader:  An instance of class Reader
-            kCV:  Desired number of CV partitions.  Should normally be
+            reader:  An instance of class inheriting from ReaderCV.
+            k_cv:  Desired number of CV partitions.  Should normally be
                 a divisor of the number of raw partitions in the reader.
         """
         
         self.reader = reader
-        self.kCV = kCV
+        self.k_cv = k_cv
         
         # Booked total counts
-        self.totalCounts = {}
+        self.total_counts = {}
         
         # Order in which partitions will be iterated during
         # cross-validation
@@ -623,26 +623,26 @@ class RepeatedCV:
         
         # Current partitions that constituent current test set and
         # corresponding counts for booked histograms
-        self.testPartitions = None
-        self.testCounts = {}
+        self.test_partitions = None
+        self.test_counts = {}
         
         # Complementary counts that define the training set
-        self.trainCounts = {}
+        self.train_counts = {}
     
     
     def book(self, names):
         """Specify names of histogram sets that will be used."""
         
-        newTotalCounts = {}
+        new_total_counts = {}
         
         for name in names:
-            if name in self.totalCounts:
+            if name in self.total_counts:
                 # Already booked.  No need to read again.
-                newTotalCounts[name] = self.totalCounts[name]
+                new_total_counts[name] = self.total_counts[name]
             else:
-                newTotalCounts[name] = self.reader.read_counts(name)
+                new_total_counts[name] = self.reader.read_counts(name)
         
-        self.totalCounts = newTotalCounts
+        self.total_counts = new_total_counts
     
     
     def create_cv_partitions(self, k):
@@ -655,51 +655,51 @@ class RepeatedCV:
                 partitions define the training data.
         """
         
-        if k < 0 or k >= self.kCV:
-            raise RuntimeError('Illegal index.')
+        if k < 0 or k >= self.k_cv:
+            raise IndexError('Illegal index.')
         
-        cvLength = round(len(self.partitions) / self.kCV)
+        cv_length = round(len(self.partitions) / self.k_cv)
         
-        if k < self.kCV - 1:
-            self.testPartitions = self.partitions[k * cvLength : (k + 1) * cvLength]
+        if k < self.k_cv - 1:
+            self.test_partitions = self.partitions[k * cv_length : (k + 1) * cv_length]
         else:
             # Special treatment for the last CV partition in case the
             # number of CV folds is not aligned with the number of
             # partitions.  This way all data are utilized.
-            self.testPartitions = self.partitions[k * cvLength :]
+            self.test_partitions = self.partitions[k * cv_length :]
         
         
         # Update counts for booked histograms
-        self.testCounts, self.trainCounts = {}, {}
+        self.test_counts, self.train_counts = {}, {}
         
-        for name, totalCounts in self.totalCounts.items():
-            testCounts = self.reader.read_counts_partitions(name, self.testPartitions)
-            self.testCounts[name] = testCounts
-            self.trainCounts[name] = totalCounts - testCounts
+        for name, total_counts in self.total_counts.items():
+            test_counts = self.reader.read_counts_partitions(name, self.test_partitions)
+            self.test_counts[name] = test_counts
+            self.train_counts[name] = total_counts - test_counts
     
     
     def get_counts_test(self, name):
         """Provide counts in the current test set."""
         
-        if not self.testCounts:
+        if not self.test_counts:
             raise RuntimeError('CV partitions have not been created.')
         
-        if name not in self.testCounts:
+        if name not in self.test_counts:
             raise RuntimeError('Counts with name "{}" have not been booked.'.format(name))
         
-        return self.testCounts[name]
+        return self.test_counts[name]
     
     
     def get_counts_train(self, name):
         """Provide counts in the current training set."""
         
-        if not self.trainCounts:
+        if not self.train_counts:
             raise RuntimeError('CV partitions have not been created.')
         
-        if name not in self.trainCounts:
+        if name not in self.train_counts:
             raise RuntimeError('Counts with name "{}" have not been booked.'.format(name))
         
-        return self.trainCounts[name]
+        return self.train_counts[name]
     
     
     def shuffle(self):
@@ -709,8 +709,8 @@ class RepeatedCV:
         """
         
         np.random.shuffle(self.partitions)
-        self.testPartitions = None
-        self.testCounts = {}
+        self.test_partitions = None
+        self.test_counts = {}
 
 
 
