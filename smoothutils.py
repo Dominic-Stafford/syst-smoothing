@@ -517,14 +517,14 @@ class AdaptiveRebinner(RebinnerND):
             # channels
             template_rebinned_sum_channels = np.sum(template_rebinned, axis=0)
             
-            with np.errstate(divide='ignore'):
+            with np.errstate(invalid='ignore'):
                 rel_unc_sq = template_rebinned_sum_channels[..., 1] / \
                     template_rebinned_sum_channels[..., 0] ** 2
             
             rel_unc_sq[np.isnan(rel_unc_sq)] = np.inf
             
             
-            # Find bin with largest uncertainty
+            # Find bin with the largest uncertainty
             cur_max_unc_index = np.unravel_index(np.argmax(rel_unc_sq), rel_unc_sq.shape)
             
             if rel_unc_sq[cur_max_unc_index] < max_rel_unc ** 2:
@@ -532,14 +532,27 @@ class AdaptiveRebinner(RebinnerND):
                 break
             
             
-            # Find which of the four direct neighbour bins has the
-            # largest uncertainty
-            neighbours = [(0, 1), (0, -1), (1, 0), (-1, 0)]
-            neighbour_unc_sq = np.zeros(4)
+            # Check the four possible regions to merge that contain the
+            # bin with the largest uncertainty.  Choose from them the
+            # one that contains the smallest effective number of events.
+            # This way the merging that has the less drastic overall
+            # effect is chosen.  The effective number of events equals
+            # 1 divided by the squared relative uncertainty.  The
+            # regions are identified by the relative position of one of
+            # the four neighbouring bins.
+            regions = {
+                (0, 1): (slice(None), slice(cur_max_unc_index[1], cur_max_unc_index[1] + 2)),
+                (0, -1): (slice(None), slice(cur_max_unc_index[1] - 1, cur_max_unc_index[1] + 1)),
+                (1, 0): (slice(cur_max_unc_index[0], cur_max_unc_index[0] + 2), slice(None)),
+                (-1, 0): (slice(cur_max_unc_index[0] - 1, cur_max_unc_index[0] + 1), slice(None))
+            }
+            smallest_num_eff = math.inf
+            chosen_region_key = None
             
-            for i in range(len(neighbours)):
-                neighbour_index = tuple(
-                    np.asarray(cur_max_unc_index) + np.asarray(neighbours[i])
+            for region_key, region in regions.items():
+                neighbour_index = (
+                    cur_max_unc_index[0] + region_key[0],
+                    cur_max_unc_index[1] + region_key[1]
                 )
                 
                 # Skip neighbours clipped by the boundary
@@ -549,21 +562,24 @@ class AdaptiveRebinner(RebinnerND):
                 ):
                     continue
                 
-                neighbour_unc_sq[i] = rel_unc_sq[neighbour_index]
-            
-            cur_max_unc_neighbour = neighbours[np.argmax(neighbour_unc_sq)]
+                # Check the effective number of events in the region
+                num_eff = np.sum(1 / rel_unc_sq[region])
+                
+                if num_eff < smallest_num_eff:
+                    smallest_num_eff = num_eff
+                    chosen_region_key = region_key
             
             
             # Update the rebin map
-            if cur_max_unc_neighbour[0] == 0:
+            if chosen_region_key[0] == 0:
                 # Merging two mass bins
-                if cur_max_unc_neighbour[1] > 0:
+                if chosen_region_key[1] > 0:
                     del self.rebinners[1].rebin_map[cur_max_unc_index[1] + 1]
                 else:
                     del self.rebinners[1].rebin_map[cur_max_unc_index[1]]
             else:
                 # Merging two angle bins
-                if cur_max_unc_neighbour[0] > 0:
+                if chosen_region_key[0] > 0:
                     del self.rebinners[0].rebin_map[cur_max_unc_index[0] + 1]
                 else:
                     del self.rebinners[0].rebin_map[cur_max_unc_index[0]]
@@ -1027,7 +1043,9 @@ if __name__ == '__main__':
     # Tests for AdaptiveRebinner
     def print_rel_unc(template):
         template_sum_channels = np.sum(template, axis=0)
-        print(np.sqrt(template_sum_channels[..., 1]) / template_sum_channels[..., 0])
+        with np.errstate(invalid='ignore'):
+            rel_unc = np.sqrt(template_sum_channels[..., 1]) / template_sum_channels[..., 0]
+        print(rel_unc)
     
     def print_rebin_map(rebinner):
         for r in rebinner.rebinners:
