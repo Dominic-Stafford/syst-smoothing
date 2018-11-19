@@ -779,6 +779,12 @@ class Smoother:
         self.rebin_for_smoothing = rebin_for_smoothing
         
         
+        # Sanity check: the procedure does not work when the nominal
+        # template is empty in some bins for all channels
+        if np.any(np.sum(self.nominal, axis=0)[..., 0] == 0.):
+            raise RuntimeError('Smoothing is not supported for nominal templates with empty bins.')
+        
+        
         # Precompute relative deviation from the nominal template,
         # averaged over channels and up and down variations.  The sign
         # is chosen in such a way that obtained deviation corresponds to
