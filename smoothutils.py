@@ -784,8 +784,22 @@ class Smoother:
         # is chosen in such a way that obtained deviation corresponds to
         # the up variation.  The shape of produced array is
         # (num_bins_angle, num_bins_mass).
-        self.average_deviation = 0.5 * np.sum(self.up[..., 0] - self.down[..., 0], axis=0) / \
-            np.sum(self.nominal[..., 0], axis=0)
+        u = np.sum(self.up[..., 0], axis=0)
+        d = np.sum(self.down[..., 0], axis=0)
+        n = np.sum(self.nominal[..., 0], axis=0)
+        self.average_deviation = 0.5 * (u - d) / n
+        
+        
+        # Compute uncertainties on the relative deviation using naive
+        # error propagation formulas.  Uncertainties of the three input
+        # templates are assumed to be independent.  Note that for
+        # smoothing of the average deviation only the relative
+        # uncertainty in different bins is relavant.
+        u_unc2 = np.sum(self.up[..., 1], axis=0)
+        d_unc2 = np.sum(self.down[..., 1], axis=0)
+        n_unc2 = np.sum(self.nominal[..., 1], axis=0)
+        self.average_deviation_unc2 = (u_unc2 + d_unc2 + ((u - d) / n) ** 2 * n_unc2) / \
+            (2 * n) ** 2
         
         
         # Precompute templates with the binning used for the computation
@@ -1007,8 +1021,8 @@ class Smoother:
         smooth_average_deviation = lowess2d_grid(
             np.arange(0., self.nominal.shape[1], dtype=np.float64),
             np.arange(0., self.nominal.shape[2], dtype=np.float64),
-            self.average_deviation,
-            bandwidth
+            self.average_deviation, bandwidth,
+            weights=1 / self.average_deviation_unc2
         )
         
         return smooth_average_deviation
@@ -1031,7 +1045,8 @@ class Smoother:
         for bin_angle in range(num_bins_angle):
             deviation_slice = self.average_deviation[bin_angle]
             smooth_average_deviation[bin_angle] = lowess(
-                range(len(deviation_slice)), deviation_slice, bandwidth
+                range(len(deviation_slice)), deviation_slice, bandwidth,
+                weights=1 / self.average_deviation_unc2
             )
         
         return smooth_average_deviation
