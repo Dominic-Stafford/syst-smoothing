@@ -53,7 +53,7 @@ class ReaderBase:
         hist = next(
             key for key in self.templates_file.Get(self.channels[0]).GetListOfKeys()
         ).ReadObj()
-        self.num_bins_mass, self.num_bins_angle = self._extract_dimensions(hist)
+        self.num_bins_angle, self.num_bins_mass = self._extract_dimensions(hist)
     
     
     def get_syst_names(self):
@@ -204,7 +204,7 @@ class ReaderCV(ReaderBase):
         num_bins_angle = hist.GetNbinsY()
         self.num_partitions = hist.GetNbinsZ()
         
-        return num_bins_mass, num_bins_angle
+        return num_bins_angle, num_bins_mass
     
     
     def _hist_to_array(self, hist):
@@ -285,7 +285,7 @@ class ReaderUnrolled(ReaderBase):
                 'Total number of bins is not aligned with given number of bins along the angle axis'
             )
         
-        return hist.GetNbinsX() // self.num_bins_angle, self.num_bins_angle
+        return self.num_bins_angle, hist.GetNbinsX() // self.num_bins_angle
     
     
     def _hist_to_array(self, hist):
@@ -459,7 +459,7 @@ class RebinnerND:
     def translate_index(self, index_source):
         """Map bin in source binning into target binning.
         
-        If for some axes to rebinners are available, bin indices along
+        If for some axes no rebinners are available, bin indices along
         them are left unchanged.
         
         Arguments:
@@ -926,9 +926,12 @@ class Smoother:
             for bin_angle, bin_mass in itertools.product(
                 range(nominal.shape[1]), range(nominal.shape[2])
             ):
-                deviation[bin_angle, bin_mass] = deviation_coarse(
-                    self.rebinner.translate_index((bin_angle, bin_mass))
-                )
+                deviation[bin_angle, bin_mass] = deviation_coarse[
+                    self.rebinner.translate_index((0, bin_angle, bin_mass))[1:]
+                ]
+                # The rebinner uses the standard NumPy representation,
+                # which contains also an index for the channel.  Add a
+                # dummy one here.
             
         
         total_scaling = 1 + scale_factor * deviation
@@ -1023,6 +1026,12 @@ class Smoother:
         half-sizes of the windows, expressed in the number of bins, used
         along the dimensions of the angle and mass (in this order).
         """
+        
+        if bandwidth[0] <= 1 or bandwidth[1] <= 1:
+            raise RuntimeError(
+                'Cannot perform 2D smoothing when the window contains only a single bin along '
+                'one of the dimensions.'
+            )
         
         smooth_average_deviation = lowess2d_grid(
             np.arange(0., self.nominal.shape[1], dtype=np.float64),
