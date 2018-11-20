@@ -53,12 +53,27 @@ def compute_error(nominal_train, syst_smooth, nominal_test, syst_test, max_rel_u
             # Squared uncertainty computed with the usual error
             # propagation:
             #  Var[s/n - 1] = Var[s] / n^2 + Var[n] * s^2 / n^4
+            # Include terms for both test and training set because the
+            # uncertainty for computed on the test set alone can be
+            # grossly wrong when the number of events in it is small.
+            # There is some double counting of the uncertainty, but its
+            # absolute scale is not important to choose the bandwidth.
             unc2 = syst_test[i][..., 1] / nominal_test[..., 0] ** 2 + \
-                nominal_test[..., 1] * syst_test[i][..., 0] ** 2 / nominal_test[..., 0] ** 4
+                nominal_test[..., 1] * syst_test[i][..., 0] ** 2 / nominal_test[..., 0] ** 4 + \
+                syst_smooth[i][..., 1] / nominal_train[..., 0] ** 2 + \
+                nominal_train[..., 1] * syst_smooth[i][..., 0] ** 2 / nominal_train[..., 0] ** 4
             
             r2 = diff2 / unc2
         
         chi2 += np.sum(r2[populated_bins])
+    
+    
+    # Sanity checks
+    if not np.isfinite(chi2):
+        raise RuntimeError('Obtained chi^2 is not a finite number.')
+    
+    if chi2 == 0:
+        raise RuntimeError('Obtained a zero chi^2.')
     
     return chi2
 
@@ -91,8 +106,8 @@ if __name__ == '__main__':
     
     # Bandwidths to try
     bandwidths = list(itertools.product(
-        [0.3, 0.5, 1.],      # Angle
-        [0.2, 0.3, 0.5, 1.]  # Mass
+        [0.3, 0.5, 1., 1.5],      # Angle
+        [0.2, 0.3, 0.5, 1., 1.5]  # Mass
     ))
     
     
@@ -115,16 +130,13 @@ if __name__ == '__main__':
             
             repeated_cv.create_cv_partitions(icv)
             
-            nominal_train = repeated_cv.get_counts_train(nominal_name)
-            up_train = repeated_cv.get_counts_train(up_name)
-            down_train = repeated_cv.get_counts_train(down_name)
-            
-            nominal_test = repeated_cv.get_counts_test(nominal_name)
-            up_test = repeated_cv.get_counts_test(up_name)
-            down_test = repeated_cv.get_counts_test(down_name)
+            nominal_test_rebinned = rebinner(repeated_cv.get_counts_test(nominal_name))
+            up_test_rebinned = rebinner(repeated_cv.get_counts_test(up_name))
+            down_test_rebinned = rebinner(repeated_cv.get_counts_test(down_name))
             
             smoother = Smoother(
-                nominal_train, up_train, down_train,
+                repeated_cv.get_counts_train(nominal_name),
+                repeated_cv.get_counts_train(up_name), repeated_cv.get_counts_train(down_name),
                 rebinner, rebin_for_smoothing=True
             )
             
@@ -133,9 +145,12 @@ if __name__ == '__main__':
                     bandwidth[0] * reader.num_bins_angle,
                     bandwidth[1] * reader.num_bins_mass
                 ))
+                
+                # Compute approximation error using the coarse binning
                 error = compute_error(
-                    nominal_train, (up_smooth, down_smooth),
-                    nominal_test, (up_test, down_test)
+                    smoother.nominal,
+                    (rebinner(up_smooth), rebinner(down_smooth)),
+                    nominal_test_rebinned, (up_test_rebinned, down_test_rebinned)
                 )
                 cv_errors[bandwidth].append(error)
     
