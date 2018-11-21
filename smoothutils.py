@@ -130,7 +130,7 @@ class ReaderCV(ReaderBase):
         """Read partitions from set of templates.
         
         Read a set of templates with the given name and merge requested
-        partitions.  Consider under- and overflows for the mass.
+        partitions.
         
         Arguments:
             name:  Name that identifies the set of histograms.
@@ -152,11 +152,11 @@ class ReaderCV(ReaderBase):
                 raise RuntimeError('Failed to read histogram "{}".'.format(hist_name))
             
             for partition, bin_mass, bin_angle in itertools.product(
-                partitions, range(hist.GetNbinsX() + 2), range(1, hist.GetNbinsY() + 1)
+                partitions, range(1, hist.GetNbinsX() + 1), range(1, hist.GetNbinsY() + 1)
             ):
-                counts[i_channel, bin_angle - 1, bin_mass, 0] += \
+                counts[i_channel, bin_angle - 1, bin_mass - 1, 0] += \
                     hist.GetBinContent(bin_mass, bin_angle, partition + 1)
-                counts[i_channel, bin_angle - 1, bin_mass, 1] += \
+                counts[i_channel, bin_angle - 1, bin_mass - 1, 1] += \
                     hist.GetBinError(bin_mass, bin_angle, partition + 1) ** 2
         
         return counts
@@ -165,8 +165,7 @@ class ReaderCV(ReaderBase):
     def read_counts(self, name):
         """Read templates with the given name combining all partitions.
         
-        Implement the method from the base class.  Consider under- and
-        overflows for the mass.
+        Implement the method from the base class.
         """
         
         counts = self._zero_counts()
@@ -193,14 +192,14 @@ class ReaderCV(ReaderBase):
         
         Implement the abstract method from the base class.  In addition
         to extracting the numbers of bins along the mass and angle axes,
-        determine the number of partitions.  For the mass, under- and
-        overflows are considered as well.
+        determine the number of partitions.  Under- and overflows are
+        ignored.
         """
         
         if hist.GetDimension() != 3:
             raise RuntimeError('Template of unexpected dimension {}.'.format(hist.GetDimension()))
         
-        num_bins_mass = hist.GetNbinsX() + 2
+        num_bins_mass = hist.GetNbinsX()
         num_bins_angle = hist.GetNbinsY()
         self.num_partitions = hist.GetNbinsZ()
         
@@ -212,16 +211,16 @@ class ReaderCV(ReaderBase):
         
         Return an array of shape (num_bins_angle, num_bins_mass, 2),
         where the last dimension includes bin contents and respective
-        squared errors.  Under- and overflows for mass are considered.
+        squared errors.  Under- and overflows are ignored.
         """
         
         counts = np.empty((self.num_bins_angle, self.num_bins_mass, 2))
         
         for bin_angle, bin_mass in itertools.product(
-            range(1, hist.GetNbinsY() + 1), range(hist.GetNbinsX() + 2)
+            range(1, hist.GetNbinsY() + 1), range(1, hist.GetNbinsX() + 1)
         ):
-            counts[bin_angle - 1, bin_mass, 0] = hist.GetBinContent(bin_mass, bin_angle)
-            counts[bin_angle - 1, bin_mass, 1] = hist.GetBinError(bin_mass, bin_angle) ** 2
+            counts[bin_angle - 1, bin_mass - 1, 0] = hist.GetBinContent(bin_mass, bin_angle)
+            counts[bin_angle - 1, bin_mass - 1, 1] = hist.GetBinError(bin_mass, bin_angle) ** 2
         
         return counts
 
