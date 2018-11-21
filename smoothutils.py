@@ -260,7 +260,7 @@ class ReaderUnrolled(ReaderBase):
         
         for ichannel, channel in enumerate(self.channels):
             read_name = '{}/{}'.format(channel, name)
-            template = self.src_file.Get(read_name)
+            template = self.templates_file.Get(read_name)
             
             if not template:
                 raise RuntimeError('Failed to read template "{}".'.format(read_name))

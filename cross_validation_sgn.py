@@ -127,7 +127,6 @@ if __name__ == '__main__':
         repeated_cv.shuffle()
         
         for icv in range(repeated_cv.k_cv):
-            
             repeated_cv.create_cv_partitions(icv)
             
             nominal_test_rebinned = rebinner(repeated_cv.get_counts_test(nominal_name))
