@@ -132,8 +132,9 @@ if __name__ == '__main__':
             try:
                 bandwidth = bandwidths[sgn_nominal_name, syst_name]
             except KeyError:
-                # A placeholder for debugging
-                bandwidth = (1., 1.)
+                raise KeyError('No bandwidth found for template "{}" variation "{}".'.format(
+                    sgn_nominal_name, syst_name
+                ))
             
             
             # Construct smoothed variations
