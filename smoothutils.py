@@ -50,9 +50,12 @@ class ReaderBase:
         
         # Extract the number of bins in histograms.  Since they all have
         # the same shape, pick one.
-        hist = next(
-            key for key in self.templates_file.Get(self.channels[0]).GetListOfKeys()
-        ).ReadObj()
+        for key in self.templates_file.Get(self.channels[0]).GetListOfKeys():
+            hist = key.ReadObj()
+            
+            if hist.InheritsFrom('TH1'):
+                break
+        
         self.num_bins_angle, self.num_bins_mass = self._extract_dimensions(hist)
     
     

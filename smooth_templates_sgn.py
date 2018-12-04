@@ -97,7 +97,12 @@ if __name__ == '__main__':
         out_dir = out_file.mkdir(src_dir.GetName())
         
         for template_key in src_dir.GetListOfKeys():
-            match = sgn_name_regex.match(template_key.GetName())
+            template = template_key.ReadObj()
+            
+            if not template.InheritsFrom('TH1'):
+                continue
+            
+            match = sgn_name_regex.match(template.GetName())
             
             if match:
                 # Save name of the nominal signal template to be used
@@ -110,7 +115,6 @@ if __name__ == '__main__':
                 # smoothed  (Group 5 in the regex is the name of the
                 # variation.)  Copy the template to the output file with
                 # no changes.
-                template = template_key.ReadObj()
                 template.SetDirectory(out_dir)
                 templates_to_keep.append(template)
         
