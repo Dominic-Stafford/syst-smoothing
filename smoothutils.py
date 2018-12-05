@@ -523,7 +523,13 @@ class AdaptiveRebinner(RebinnerND):
                 rel_unc_sq = template_rebinned_sum_channels[..., 1] / \
                     template_rebinned_sum_channels[..., 0] ** 2
             
+            # Set the relative uncertainty to infinity in empty bins and
+            # bins with very small content and zero error.  The latter
+            # case occurs when a very small expected number of events is
+            # set manually to previously empty bins, which is done for
+            # some templates.
             rel_unc_sq[np.isnan(rel_unc_sq)] = np.inf
+            rel_unc_sq[rel_unc_sq == 0.] = np.inf
             
             
             # Find bin with the largest uncertainty
