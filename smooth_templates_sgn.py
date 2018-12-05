@@ -102,7 +102,7 @@ if __name__ == '__main__':
             if not template.InheritsFrom('TH1'):
                 continue
             
-            match = sgn_name_regex.match(template.GetName())
+            match = sgn_name_regex.match(template_key.GetName())
             
             if match:
                 # Save name of the nominal signal template to be used
