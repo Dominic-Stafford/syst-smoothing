@@ -103,7 +103,7 @@ if __name__ == '__main__':
         raise RuntimeError('Channel "{}" is not supported.'.format(args.channel))
     
     channel_labels = {
-        'mujets': r'$\mu + \mathrm{jets}$', 'ejets': r'$e + \mathrm{jets}$', 'll': r'\ell\ell'
+        'mujets': r'$\mu + \mathrm{jets}$', 'ejets': r'$e + \mathrm{jets}$', 'll': r'$\ell\ell$'
     }
     
     
