@@ -1,8 +1,8 @@
 # Smoothing of systematic variations
 
-This repository contains code to suppress statistical fluctuations in systematic variations described by Monte-Carlo templates. The fluctuations appear when templates defining up and down variations are produced from independent MC samples, but also in case of uncertainties that allow events to migrate between different bins of the distribution, such as uncertainties in jet corrections.
+This repository contains code to suppress statistical fluctuations in systematic variations described by Monte-Carlo templates. The fluctuations appear when templates defining up and down variations are produced from independent MC samples, but also in case of uncertainties that allow events to migrate between different bins of the distribution, such as uncertainties in jet corrections. As discussed in [this talk](https://indico.in2p3.fr/event/19290/contributions/75880/), the fluctuations can lead to severe unphysical constraints on the corresponding nuisance parameters of the measurement model.
 
-Scripts included here were used in CMS HIG-17-027 to suppress fluctuations in variations related to calibration of jets and missing p<sub>T</sub> in signal templates. A somewhat similar although not identical approach was used for fluctuations in the combined background.
+Scripts included here were used in [CMS HIG-17-027](http://cms-results.web.cern.ch/cms-results/public-results/publications/HIG-17-027/index.html) to suppress fluctuations in variations related to calibration of jets and missing p<sub>T</sub> in signal templates. A somewhat similar although not identical approach was used for fluctuations in the combined background. The procedure is documented in analysis note [AN-18-077](http://cms.cern.ch/iCMS/jsp/db_notes/noteInfo.jsp?cmsnoteid=CMS%20AN-2018/077) (restricted to CMS members).
 
 
 ## Overview of the algorithm
@@ -30,7 +30,7 @@ cross_validation_sgn.py sgnHistsCV.root ggA_pos-sgn-5pc-M500 CMS_scale_j_13TeV_F
 
 It repeats 10-fold cross-validation for the given signal template and systematic variation 2k times. File `sgnHistsCV.root` contains signal templates split into partitions for cross-validation. Resulting mean errors for each probed bandwidth are stored in a text file. This should normally be executed on a batch system for various templates and variations in parallel. When the computation is done for all combinations, the results are analysed by script `analyse_cv_sgn.py`, which can also plot mean errors for different bandwidths.
 
-When optimial bandwidths are known, the smoothing can be applied with
+When optimal bandwidths are known, the smoothing can be applied with
 
 ```sh
 smooth_templates_sgn.py templates_orig.root -b bandwidths.csv -o templates_smooth.root
