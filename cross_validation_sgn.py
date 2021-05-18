@@ -79,7 +79,8 @@ def compute_error(nominal_train, syst_smooth, nominal_test, syst_test, max_rel_u
 
 
 if __name__ == '__main__':
-    
+    import time
+    t = time.time()
     ROOT.gROOT.SetBatch(True)
     
     arg_parser = argparse.ArgumentParser(__doc__)
@@ -105,18 +106,15 @@ if __name__ == '__main__':
     args = arg_parser.parse_args()
     
     # Bandwidths to try
-    bandwidths = list(itertools.product(
-        [0.3, 0.5, 1., 1.5],      # Angle
-        [0.2, 0.3, 0.5, 1., 1.5]  # Mass
-    ))
+    bandwidths = np.linspace(0.1, 1, 10)
     
     
     reader = ReaderCV(args.file)
     rebinner = AdaptiveRebinner(reader.read_counts(args.template))
     
     nominal_name = args.template
-    up_name = '{}_{}Up'.format(args.template, args.variation)
-    down_name = '{}_{}Down'.format(args.template, args.variation)
+    up_name = '{}_{}_up'.format(args.template, args.variation)
+    down_name = '{}_{}_down'.format(args.template, args.variation)
     
     repeated_cv = RepeatedCV(reader, args.k_cv)
     repeated_cv.book([nominal_name, up_name, down_name])
@@ -140,10 +138,7 @@ if __name__ == '__main__':
             )
             
             for bandwidth in bandwidths:
-                up_smooth, down_smooth = smoother.smooth((
-                    bandwidth[0] * reader.num_bins_angle,
-                    bandwidth[1] * reader.num_bins_mass
-                ))
+                up_smooth, down_smooth = smoother.smooth(bandwidth * reader.num_bins)
                 
                 # Compute approximation error using the coarse binning
                 error = compute_error(
@@ -156,10 +151,11 @@ if __name__ == '__main__':
     
     # Write results to a file
     with open(args.output, 'w') as f:
-        f.write('#Hypothesis,Variation,h_angle,h_mass,N,Mean chi2,Std chi2\n')
+        f.write('#Hypothesis,Variation,h_,N,Mean chi2,Std chi2\n')
         for bandwidth in bandwidths:
             errors = cv_errors[bandwidth]
-            f.write('{},{},{:g},{:g},{:d},{:g},{:g}\n'.format(
-                args.template, args.variation, bandwidth[0], bandwidth[1],
+            f.write('{},{},{:g},{:d},{:g},{:g}\n'.format(
+                args.template, args.variation, bandwidth,
                 len(errors), np.mean(errors), np.std(errors)
             ))
+    print(time.time()-t)

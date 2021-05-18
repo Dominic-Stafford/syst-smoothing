@@ -6,57 +6,31 @@ from operator import itemgetter
 from uuid import uuid4
 
 import numpy as np
+import uproot
 
-import ROOT
-
-from lowess import lowess, lowess2d, lowess2d_grid
+from lowess_numba import lowess
 
 
-class ReaderBase:
-    """Facilitates reading of ROOT files with templates.
+class Reader():
+    """Reader for files for cross-validation."""
     
-    Templates (represented with histograms) are supposed to be organized
-    into directories corresponding to channels.  Read templates are
-    provided to caller as NumPy arrays with the following axes: (0)
-    channel, (1) bin in angle, (2) bin in mass, (3) index distinguishing
-    between content of bin of original histogram or its squared
-    uncertainty.  This representation is also referred to as "counts".
-    
-    
-    This is an abstact base class.
-    """
-    
-    def __init__(self, file_name, channels=None):
+    def __init__(self, file_name):
         """Initialize from a ROOT file with templates.
         
         Arguments:
             file_name:  Path to a ROOT file with templates.
-            channels:  List with names of channels to read.  If None,
-                all channels found in the file are read.
         """
         
-        self.templates_file = ROOT.TFile(file_name)
-        
-        if channels:
-            self.channels = list(channels)
-        else:
-            # Extract the list of channels
-            self.channels = []
-            
-            for key in self.templates_file.GetListOfKeys():
-                if key.GetClassName() == 'TDirectoryFile':
-                    self.channels.append(key.GetName())
-        
+        self.templates_file = uproot.open(file_name)
         
         # Extract the number of bins in histograms.  Since they all have
-        # the same shape, pick one.
-        for key in self.templates_file.Get(self.channels[0]).GetListOfKeys():
-            hist = key.ReadObj()
-            
-            if hist.InheritsFrom('TH1'):
-                break
+        # the same shape, pick one. Currently assuming only hists are saved in the file
+        hist = self.templates_file.values()[0]
+        if len(hist.to_numpy()) != 3:
+            raise RuntimeError('Template of unexpected dimension {}.'.format(len(hist.to_numpy()) - 1))
         
-        self.num_bins_angle, self.num_bins_mass = self._extract_dimensions(hist)
+        self.num_bins = len(hist.to_numpy()[1]) - 1
+        self.num_partitions = len(hist.to_numpy()[2]) - 1
     
     
     def get_syst_names(self):
@@ -74,60 +48,11 @@ class ReaderBase:
                 syst_names.add(name[:-2])
         
         return syst_names
-    
-    
-    def read_counts(self, name):
-        """Read templates with the given name.
-        
-        Arguments:
-            name:  Name that identifies requested set of histograms.
-        
-        Return value:
-            Templates in standard NumPy representation.
-        
-        Must be implemented in a derived class.
-        """
-        
-        raise NotImplemented
-    
-    
-    def _extract_dimensions(self, hist):
-        """Extract dimensions from given ROOT histogram.
-        
-        Arguments:
-            hist:  ROOT histogram.
-        
-        Return value:
-            Pair of numbers of bins along the mass and the angle axes.
-        
-        Must be implemented in a derived class.
-        """
-        
-        raise NotImplemented
-    
-    
+
     def _zero_counts(self):
         """Create empty (zero) template in NumPy representation."""
         
-        return np.zeros((len(self.channels), self.num_bins_angle, self.num_bins_mass, 2))
-
-
-class ReaderCV(ReaderBase):
-    """Reader for files for cross-validation.
-    
-    Templates in input files are repesented with histograms in mass and
-    angle and have an additional dimension for the partition used in the
-    cross-validation procedure.
-    """
-    
-    def __init__(self, file_name, channels=None):
-        """Initialize from a ROOT file with templates.
-        
-        Delegate initialization to base class.
-        """
-        
-        super().__init__(file_name, channels)
-    
+        return np.zeros((self.num_bins, 2)) 
     
     def read_counts_partitions(self, name, partitions):
         """Read partitions from set of templates.
@@ -146,22 +71,14 @@ class ReaderCV(ReaderBase):
         """
         
         counts = self._zero_counts()
+
+        hist = self.templates_file[name]
         
-        for i_channel, channel in enumerate(self.channels):
-            hist_name = '{}/{}'.format(channel, name)
-            hist = self.templates_file.Get(hist_name)
-            
-            if not hist:
-                raise RuntimeError('Failed to read histogram "{}".'.format(hist_name))
-            
-            for partition, bin_mass, bin_angle in itertools.product(
-                partitions, range(1, hist.GetNbinsX() + 1), range(1, hist.GetNbinsY() + 1)
-            ):
-                counts[i_channel, bin_angle - 1, bin_mass - 1, 0] += \
-                    hist.GetBinContent(bin_mass, bin_angle, partition + 1)
-                counts[i_channel, bin_angle - 1, bin_mass - 1, 1] += \
-                    hist.GetBinError(bin_mass, bin_angle, partition + 1) ** 2
+        if not hist:
+            raise RuntimeError('Failed to read histogram "{}".'.format(name))
         
+        counts[:, 0] = np.sum(hist.values()[:, partitions], axis=1)
+        counts[:, 1] = np.sum(hist.variances()[:, partitions], axis=1)
         return counts
     
     
@@ -170,142 +87,17 @@ class ReaderCV(ReaderBase):
         
         Implement the method from the base class.
         """
+
+        hist = self.templates_file[name]
         
-        counts = self._zero_counts()
+        if not hist:
+            raise RuntimeError('Failed to read histogram "{}".'.format(name))
         
-        for i_channel, channel in enumerate(self.channels):
-            hist_name = '{}/{}'.format(channel, name)
-            hist = self.templates_file.Get(hist_name)
-            
-            if not hist:
-                raise RuntimeError('Failed to read histogram "{}".'.format(hist_name))
-            
-            hist.GetZaxis().SetRange(1, self.num_partitions)
-            hist_2d = hist.Project3D('yx e')
-            hist_2d.SetName(uuid4().hex)
-            hist_2d.SetDirectory(None)
-            
-            counts[i_channel] = self._hist_to_array(hist_2d)
+        counts = np.empty((self.num_bins, 2))
+        counts[:, 0] = np.sum(hist.values(), axis=1)
+        counts[:, 1] = np.sum(hist.variances(), axis=1)
         
         return counts
-    
-    
-    def _extract_dimensions(self, hist):
-        """Extract dimensions from given ROOT histogram.
-        
-        Implement the abstract method from the base class.  In addition
-        to extracting the numbers of bins along the mass and angle axes,
-        determine the number of partitions.  Under- and overflows are
-        ignored.
-        """
-        
-        if hist.GetDimension() != 3:
-            raise RuntimeError('Template of unexpected dimension {}.'.format(hist.GetDimension()))
-        
-        num_bins_mass = hist.GetNbinsX()
-        num_bins_angle = hist.GetNbinsY()
-        self.num_partitions = hist.GetNbinsZ()
-        
-        return num_bins_angle, num_bins_mass
-    
-    
-    def _hist_to_array(self, hist):
-        """Convert histogram of (mass, angle) into NumPy representation.
-        
-        Return an array of shape (num_bins_angle, num_bins_mass, 2),
-        where the last dimension includes bin contents and respective
-        squared errors.  Under- and overflows are ignored.
-        """
-        
-        counts = np.empty((self.num_bins_angle, self.num_bins_mass, 2))
-        
-        for bin_angle, bin_mass in itertools.product(
-            range(1, hist.GetNbinsY() + 1), range(1, hist.GetNbinsX() + 1)
-        ):
-            counts[bin_angle - 1, bin_mass - 1, 0] = hist.GetBinContent(bin_mass, bin_angle)
-            counts[bin_angle - 1, bin_mass - 1, 1] = hist.GetBinError(bin_mass, bin_angle) ** 2
-        
-        return counts
-
-
-
-class ReaderUnrolled(ReaderBase):
-    """Reader for templates represented by unrolled histograms.
-    
-    Templates in input files are represented with originally 2D
-    histograms in (mass, angle) that have been unrolled into 1D with the
-    mass index running in the inner loop, i.e. all mass bins for one
-    angular bin are put side by side, they are followed by all mass bins
-    for the next angular bin, and so on.
-    """
-    
-    def __init__(self, file_name, num_bins_angle, channels=None):
-        """Initialize from a ROOT file with templates.
-        
-        Arguments:
-            file_name:  Path to the ROOT file with templates.
-            num_bins_angle:  Number of bins along the angle axis.
-            channels:  List of channels to read.  See documentation for
-                the base class.
-        """
-        
-        self.num_bins_angle = num_bins_angle
-        super().__init__(file_name, channels)
-    
-    
-    def read_counts(self, name):
-        """Read templates with the given name combining all partitions.
-        
-        Implement the method from the base class.
-        """
-        
-        counts = self._zero_counts()
-        
-        for ichannel, channel in enumerate(self.channels):
-            read_name = '{}/{}'.format(channel, name)
-            template = self.templates_file.Get(read_name)
-            
-            if not template:
-                raise RuntimeError('Failed to read template "{}".'.format(read_name))
-            
-            counts[ichannel] = self._hist_to_array(template)
-        
-        return counts
-    
-    
-    def _extract_dimensions(self, hist):
-        """Extract dimensions from given ROOT histogram.
-        
-        Implement the abstract method from the base class.
-        """
-        
-        if hist.GetDimension() != 1:
-            raise RuntimeError('Template of unexpected dimension {}.'.format(hist.GetDimension()))
-        
-        if hist.GetNbinsX() % self.num_bins_angle != 0:
-            raise RuntimeError(
-                'Total number of bins is not aligned with given number of bins along the angle axis'
-            )
-        
-        return self.num_bins_angle, hist.GetNbinsX() // self.num_bins_angle
-    
-    
-    def _hist_to_array(self, hist):
-        """Convert unrolled histogram into NumPy representation.
-        
-        Return an array of shape (num_bins_angle, num_bins_mass, 2),
-        where the last dimension includes bin contents and respective
-        squared errors.
-        """
-        
-        counts_flat = np.empty((hist.GetNbinsX(), 2))
-        
-        for i in range(len(counts_flat)):
-            counts_flat[i, 0] = hist.GetBinContent(i + 1)
-            counts_flat[i, 1] = hist.GetBinError(i + 1) ** 2
-        
-        return counts_flat.reshape(self.num_bins_angle, self.num_bins_mass, 2)
-
 
 
 class Rebinner1D:
@@ -320,7 +112,7 @@ class Rebinner1D:
         
         Arguments:
             source_binning, target_binning:  Source and target binnings.
-                Mist satisfy requirements listed for _build_rebin_map.
+                Must satisfy requirements listed for _build_rebin_map.
             axis:  Axis along which the rebinning is to be performed.
         """
         
@@ -426,6 +218,7 @@ class Rebinner1D:
 
 
 
+
 class RebinnerND:
     """A class to rebin NumPy arrays along multiple axes.
     
@@ -482,7 +275,6 @@ class RebinnerND:
         return tuple(index_target)
 
 
-
 class AdaptiveRebinner(RebinnerND):
     """Adaptive version of RebinnerND.
     
@@ -503,25 +295,20 @@ class AdaptiveRebinner(RebinnerND):
                 condition for the optimization.
         """
         
-        if template.ndim != 4:
+        if template.ndim != 2:
             raise RuntimeError('Unexpected dimensionality {}.'.format(template.ndim))
         
         
         self.rebinners = [
-            Rebinner1D.from_map(list(range(template.shape[1] + 1)), 1),  # Angle
-            Rebinner1D.from_map(list(range(template.shape[2] + 1)), 2)   # Mass
+            Rebinner1D.from_map(list(range(template.shape[0] + 1)), 0)
         ]
         
         template_rebinned = template
         
         while True:
-            # Compute (squared) relative uncertainties for the sum over
-            # channels
-            template_rebinned_sum_channels = np.sum(template_rebinned, axis=0)
             
             with np.errstate(invalid='ignore'):
-                rel_unc_sq = template_rebinned_sum_channels[..., 1] / \
-                    template_rebinned_sum_channels[..., 0] ** 2
+                rel_unc_sq = template_rebinned[..., 1] / template_rebinned[..., 0] ** 2
             
             # Set the relative uncertainty to infinity in empty bins and
             # bins with very small content and zero error.  The latter
@@ -533,7 +320,7 @@ class AdaptiveRebinner(RebinnerND):
             
             
             # Find bin with the largest uncertainty
-            cur_max_unc_index = np.unravel_index(np.argmax(rel_unc_sq), rel_unc_sq.shape)
+            cur_max_unc_index = np.argmax(rel_unc_sq)
             
             if rel_unc_sq[cur_max_unc_index] < max_rel_unc ** 2:
                 # The procedure has terminated
@@ -548,55 +335,20 @@ class AdaptiveRebinner(RebinnerND):
             # 1 divided by the squared relative uncertainty.  The
             # regions are identified by the relative position of one of
             # the four neighbouring bins.
-            regions = {
-                (0, 1): (slice(None), slice(cur_max_unc_index[1], cur_max_unc_index[1] + 2)),
-                (0, -1): (slice(None), slice(cur_max_unc_index[1] - 1, cur_max_unc_index[1] + 1)),
-                (1, 0): (slice(cur_max_unc_index[0], cur_max_unc_index[0] + 2), slice(None)),
-                (-1, 0): (slice(cur_max_unc_index[0] - 1, cur_max_unc_index[0] + 1), slice(None))
-            }
-            smallest_num_eff = math.inf
-            chosen_region_key = None
-            
-            for region_key, region in regions.items():
-                neighbour_index = (
-                    cur_max_unc_index[0] + region_key[0],
-                    cur_max_unc_index[1] + region_key[1]
-                )
-                
-                # Skip neighbours clipped by the boundary
-                if not (
-                    0 <= neighbour_index[0] < rel_unc_sq.shape[0] and
-                    0 <= neighbour_index[1] < rel_unc_sq.shape[1]
-                ):
-                    continue
-                
-                # Check the effective number of events in the region
-                num_eff = np.sum(1 / rel_unc_sq[region])
-                
-                if num_eff < smallest_num_eff:
-                    smallest_num_eff = num_eff
-                    chosen_region_key = region_key
-            
-            
-            # Update the rebin map
-            if chosen_region_key[0] == 0:
-                # Merging two mass bins
-                if chosen_region_key[1] > 0:
-                    del self.rebinners[1].rebin_map[cur_max_unc_index[1] + 1]
-                else:
-                    del self.rebinners[1].rebin_map[cur_max_unc_index[1]]
+
+            if cur_max_unc_index == 0:
+                del self.rebinners[0].rebin_map[1]
+            elif cur_max_unc_index == len(rel_unc_sq) - 1:
+                del self.rebinners[0].rebin_map[cur_max_unc_index]
+            elif rel_unc_sq[cur_max_unc_index + 1] > rel_unc_sq[cur_max_unc_index - 1]:
+                del self.rebinners[0].rebin_map[cur_max_unc_index + 1]
             else:
-                # Merging two angle bins
-                if chosen_region_key[0] > 0:
-                    del self.rebinners[0].rebin_map[cur_max_unc_index[0] + 1]
-                else:
-                    del self.rebinners[0].rebin_map[cur_max_unc_index[0]]
-            
-            
+                del self.rebinners[0].rebin_map[cur_max_unc_index]
+
             # Rebin the template
             template_rebinned = self(template)
             
-            if template_rebinned.shape == (1, 1):
+            if len(template_rebinned) == 1:
                 # Cannot rebin any further: there is only one bin left
                 break
 
@@ -789,7 +541,7 @@ class Smoother:
         
         # Sanity check: the procedure does not work when the nominal
         # template is empty in some bins for all channels
-        if np.any(np.sum(self.nominal, axis=0)[..., 0] == 0.):
+        if np.any(self.nominal[..., 0] == 0.):
             raise RuntimeError('Smoothing is not supported for nominal templates with empty bins.')
         
         
@@ -798,10 +550,7 @@ class Smoother:
         # is chosen in such a way that obtained deviation corresponds to
         # the up variation.  The shape of produced array is
         # (num_bins_angle, num_bins_mass).
-        u = np.sum(self.up[..., 0], axis=0)
-        d = np.sum(self.down[..., 0], axis=0)
-        n = np.sum(self.nominal[..., 0], axis=0)
-        self.average_deviation = 0.5 * (u - d) / n
+        self.average_deviation = 0.5 * (self.up[:, 0] - self.down[:, 0]) / self.nominal[:, 0]
         
         
         # Compute uncertainties on the relative deviation using naive
@@ -809,11 +558,8 @@ class Smoother:
         # templates are assumed to be independent.  Note that for
         # smoothing of the average deviation only the relative
         # uncertainty in different bins is relavant.
-        u_unc2 = np.sum(self.up[..., 1], axis=0)
-        d_unc2 = np.sum(self.down[..., 1], axis=0)
-        n_unc2 = np.sum(self.nominal[..., 1], axis=0)
-        self.average_deviation_unc2 = (u_unc2 + d_unc2 + ((u - d) / n) ** 2 * n_unc2) / \
-            (2 * n) ** 2
+        self.average_deviation_unc2 = (self.up[:, 1] + self.down[:, 1] + ((self.up[:, 0] - self.down[:, 0]) / self.nominal[:, 0]) ** 2
+                                       * self.nominal[:, 1]) / (2 * self.nominal[:, 0]) ** 2
         
         
         # Precompute templates with the binning used for the computation
@@ -832,7 +578,7 @@ class Smoother:
         self.scale_factors, self.raw_scale_factors = None, None
             
 
-    def smooth(self, bandwidth, algo='2D'):
+    def smooth(self, bandwidth):
         """Perform LOWESS smoothing using given bandwidth.
         
         Arguments:
@@ -852,12 +598,7 @@ class Smoother:
         """
         
         # Construct smoothed average deviation
-        if algo == '2D':
-            self.smooth_average_deviation = self._smooth_impl_2d(bandwidth)
-        elif algo == 'mass':
-            self.smooth_average_deviation = self._smooth_impl_mass(bandwidth)
-        else:
-            raise RuntimeError('Unknown algorithm "{}".'.format(algo))
+        self.smooth_average_deviation = self._smooth_1d(bandwidth)
         
         
         # Compute scale factors for up and down variations
@@ -898,65 +639,6 @@ class Smoother:
                 self.rebinner(systs_smooth[0]),
                 self.rebinner(systs_smooth[1])
             )
-    
-    
-    def _apply_deviation(self, nominal, deviation, scale_factor=1.):
-        """Apply relative deviation to given nominal template.
-        
-        Use the same deviation for all channels.  The deviation can be
-        given with a coarser binning in angle and mass than used in the
-        nominal template.  In that case assume that the two binnings are
-        related by self.rebinner.
-        
-        Arguments:
-            nominal:  Nominal template.  Its shape is (num_bins_angle,
-                num_bins_mass).
-            deviation:  Relative deviation to be applied.  Its shape is
-                (num_bins_angle, num_bins_mass), but there might be
-                fewer bins along each axis than in the nominal template.
-            scale_factor:  Optional scale factor to rescale deviation.
-        
-        Return value:
-            New systematic template determined by the given deviation.
-            Its shape is (num_channels, num_bins_angle, num_bins_mass,
-            2), where numbers of bins along angle and mass axes are
-            given by the nominal template.
-        """
-        
-        if nominal.shape[1:3] != deviation.shape:
-            # Numbers of bins along angle and mass axes in the given
-            # nominal template do not match ones in the deviation.  The
-            # deviation mush have been computed with a coarser binning.
-            # Upscale it by duplicating bins.
-            deviation_coarse = deviation
-            deviation = np.empty(nominal.shape[1:3])
-            
-            for bin_angle, bin_mass in itertools.product(
-                range(nominal.shape[1]), range(nominal.shape[2])
-            ):
-                deviation[bin_angle, bin_mass] = deviation_coarse[
-                    self.rebinner.translate_index((0, bin_angle, bin_mass))[1:]
-                ]
-                # The rebinner uses the standard NumPy representation,
-                # which contains also an index for the channel.  Add a
-                # dummy one here.
-            
-        
-        total_scaling = 1 + scale_factor * deviation
-        total_scaling_sq = total_scaling ** 2
-        
-        template = np.copy(nominal)
-        
-        # Apply the same deviation to each channel
-        for channel_template in template:
-            
-            # Rescale central values
-            channel_template[..., 0] *= total_scaling
-            
-            # Quadratic scaling for squared uncertainties
-            channel_template[..., 1] *= total_scaling_sq
-        
-        return template
     
     
     def _compute_scale_factors(self):
@@ -1024,53 +706,61 @@ class Smoother:
         
         else:
             self.scale_factors = (self.raw_scale_factors[0][0], self.raw_scale_factors[1][0])
+    
+    
+    def _apply_deviation(self, nominal, deviation, scale_factor=1.):
+        """Apply relative deviation to given nominal template.
+        
+        Use the same deviation for all channels.  The deviation can be
+        given with a coarser binning in angle and mass than used in the
+        nominal template.  In that case assume that the two binnings are
+        related by self.rebinner.
+        
+        Arguments:
+            nominal:  Nominal template.  Its shape is (num_bins_angle,
+                num_bins_mass).
+            deviation:  Relative deviation to be applied.  Its shape is
+                (num_bins_angle, num_bins_mass), but there might be
+                fewer bins along each axis than in the nominal template.
+            scale_factor:  Optional scale factor to rescale deviation.
+        
+        Return value:
+            New systematic template determined by the given deviation.
+            Its shape is (num_channels, num_bins_angle, num_bins_mass,
+            2), where numbers of bins along angle and mass axes are
+            given by the nominal template.
+        """
+        
+        if len(nominal) != len(deviation):
+            # Numbers of bins along angle and mass axes in the given
+            # nominal template do not match ones in the deviation.  The
+            # deviation mush have been computed with a coarser binning.
+            # Upscale it by duplicating bins.
+            deviation_coarse = deviation
+            deviation = np.empty(len(nominal))
             
-    
-    
-    def _smooth_impl_2d(self, bandwidth):
-        """Peform 2D LOWESS smoothing.
+            for bin_i in range(len(nominal)):
+                deviation[bin_i] = deviation_coarse[self.rebinner.translate_index([bin_i])]
+                # The rebinner uses the standard NumPy representation,
+                # which contains also an index for the channel.  Add a
+                # dummy one here.
+            
         
-        The bandwidth must be an array_like of length 2, which gives
-        half-sizes of the windows, expressed in the number of bins, used
-        along the dimensions of the angle and mass (in this order).
-        """
+        total_scaling = 1 + scale_factor * deviation
+        total_scaling_sq = total_scaling ** 2
         
-        if bandwidth[0] <= 1 or bandwidth[1] <= 1:
-            raise RuntimeError(
-                'Cannot perform 2D smoothing when the window contains only a single bin along '
-                'one of the dimensions.'
-            )
+        template = np.copy(nominal)
         
-        smooth_average_deviation = lowess2d_grid(
-            np.arange(0., self.nominal.shape[1], dtype=np.float64),
-            np.arange(0., self.nominal.shape[2], dtype=np.float64),
-            self.average_deviation, bandwidth,
-            weights=1 / self.average_deviation_unc2
-        )
+        template[..., 0] *= total_scaling
+        template[..., 1] *= total_scaling_sq
         
-        return smooth_average_deviation
-    
-    
-    def _smooth_impl_mass(self, bandwidth):
-        """Perform 1D LOWESS smoothing along the mass dimension.
-        
-        Treat different bins in the angle independently.  Given
-        bandwidth is the half of the size of the window expressed in
-        mass bins.
-        """
-        
-        num_bins_angle = self.nominal.shape[1]
-        
-        
-        # Smooth the deviation in each angular bin independently
-        smooth_average_deviation = np.empty_like(self.average_deviation)
-        
-        for bin_angle in range(num_bins_angle):
-            deviation_slice = self.average_deviation[bin_angle]
-            smooth_average_deviation[bin_angle] = lowess(
-                range(len(deviation_slice)), deviation_slice, bandwidth,
-                weights=1 / self.average_deviation_unc2
-            )
+        return template
+
+
+    def _smooth_1d(self, bandwidth):
+        smooth_average_deviation = lowess(
+            np.arange(len(self.average_deviation), dtype=np.float64), self.average_deviation, bandwidth,
+            weights = 1 / self.average_deviation_unc2)
         
         return smooth_average_deviation
 
